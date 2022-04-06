@@ -169,6 +169,7 @@ class TcostModel(BaseCost):
         else:  # it is a pd series
             no_trade = second_term.index[second_term.isnull()]
             second_term[no_trade] = 0
+            # no trade on specific tickers
             constr += [z[second_term.index.get_loc(tick)] == 0
                        for tick in no_trade]
 

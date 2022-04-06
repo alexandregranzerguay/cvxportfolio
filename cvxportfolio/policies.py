@@ -20,6 +20,8 @@ import pandas as pd
 import numpy as np
 import logging
 import cvxpy as cvx
+import traceback
+import sys
 
 from cvxportfolio.costs import BaseCost
 from cvxportfolio.returns import BaseReturnsModel
@@ -29,7 +31,7 @@ from cvxportfolio.utils import values_in_time, null_checker
 
 __all__ = ['Hold', 'FixedTrade', 'PeriodicRebalance', 'AdaptiveRebalance',
            'SinglePeriodOpt', 'MultiPeriodOpt', 'ProportionalTrade',
-           'RankAndLongShort']
+           'RankAndLongShort', 'TrackingMultiPeriodOpt', 'TrackingSinglePeriodOpt']
 
 
 class BasePolicy(object, metaclass=ABCMeta):
@@ -293,7 +295,7 @@ class SinglePeriodOpt(BasePolicy):
                 return self._nulltrade(portfolio)
 
             return pd.Series(index=portfolio.index, data=(z.value * value))
-        except (cvx.SolverError, TypeError):
+        except (cvx.SolverError, TypeError) as e:
             logging.error(
                 'The solver %s failed. Defaulting to no trades' % self.solver)
             return self._nulltrade(portfolio)
@@ -375,6 +377,194 @@ class MultiPeriodOpt(SinglePeriodOpt):
         if self.terminal_weights is not None:
             prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
 
+        sum(prob_arr).solve(solver=self.solver)
+        return pd.Series(index=portfolio.index,
+                         data=(z_vars[0].value * value))
+
+
+class TrackingSinglePeriodOpt(BasePolicy):
+    """Single-period optimization policy.
+
+    Implements the model developed in chapter 4 of our paper
+    https://stanford.edu/~boyd/papers/cvx_portfolio.html
+    """
+
+    def __init__(self, return_forecast, returns_index, costs, constraints, solver=None,
+                 solver_opts=None):
+
+        if not isinstance(return_forecast, BaseReturnsModel):
+            null_checker(return_forecast)
+        self.return_forecast = return_forecast
+        self.returns_index = returns_index
+
+        super(TrackingSinglePeriodOpt, self).__init__()
+
+        for cost in costs:
+            assert isinstance(cost, BaseCost)
+            self.costs.append(cost)
+
+        for constraint in constraints:
+            assert isinstance(constraint, BaseConstraint)
+            self.constraints.append(constraint)
+
+        self.solver = solver
+        self.solver_opts = {} if solver_opts is None else solver_opts
+
+    def get_trades(self, portfolio, t=None):
+        """
+        Get optimal trade vector for given portfolio at time t.
+
+        Parameters
+        ----------
+        portfolio : pd.Series
+            Current portfolio vector.
+        t : pd.timestamp
+            Timestamp for the optimization.
+        """
+
+        if t is None:
+            t = dt.datetime.today()
+
+        value = sum(portfolio)
+        w = portfolio / value
+        z = cvx.Variable(w.size)  # TODO pass index
+        wplus = w.values + z
+
+        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(self.returns_index, BaseReturnsModel):
+            diff = cvx.pos(self.returns_index.weight_expr(t) - self.return_forecast.weight_expr(t, wplus))
+            tracking_term = cvx.huber(diff,0.1)
+        else:
+            # TODO: Properly implement this if I want
+            # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
+            # tracking_term = cvx.sum(cvx.multiply(
+            #     values_in_time(self.return_forecast, t).values,
+            #     wplus))
+            logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
+
+        assert(tracking_term.is_convex())
+
+        costs, constraints = [], []
+
+        for cost in self.costs:
+            cost_expr, const_expr = cost.weight_expr(t, wplus, z, value)
+            costs.append(cost_expr)
+            constraints += const_expr
+
+        for item in (con.weight_expr(t, wplus, z, value) for con in self.constraints):
+            if isinstance(item, list):
+                constraints += item
+            else :
+                constraints += [item] 
+
+        for el in costs:
+            assert (el.is_convex())
+
+        for el in constraints:
+            assert (el.is_dcp())
+
+        obj = cvx.Minimize(tracking_term + sum(costs))
+        self.prob = cvx.Problem(
+            obj,
+            [cvx.sum(z) == 0] + constraints)
+        try:
+            self.prob.solve(solver=self.solver, **self.solver_opts)
+            if self.prob.status == 'unbounded':
+                logging.error(
+                    'The problem is unbounded. Defaulting to no trades')
+                return self._nulltrade(portfolio)
+
+            if self.prob.status == 'infeasible':
+                logging.error(
+                    'The problem is infeasible. Defaulting to no trades')
+                return self._nulltrade(portfolio)
+            return pd.Series(index=portfolio.index, data=(z.value * value))
+        except (cvx.SolverError, TypeError) as e:
+            logging.error(e)
+            logging.error(
+                'The solver %s failed. Defaulting to no trades' % self.solver)
+            return self._nulltrade(portfolio)
+
+
+class TrackingMultiPeriodOpt(TrackingSinglePeriodOpt):
+
+    def __init__(self, trading_times,
+                 terminal_weights, lookahead_periods=None, *args, **kwargs):
+        """
+        trading_times: list, all times at which get_trades will be called
+        lookahead_periods: int or None. if None uses all remaining periods
+        w_track: Dataframe or array of weights at each time t
+        Q: list of Q matrix for each time step
+        """
+        # Number of periods to look ahead.
+        self.lookahead_periods = lookahead_periods
+        self.trading_times = trading_times
+        self.terminal_weights = terminal_weights
+        super(TrackingMultiPeriodOpt, self).__init__(*args, **kwargs)
+
+    def get_trades(self, portfolio, t=dt.datetime.today()):
+
+        value = sum(portfolio)
+        assert (value > 0.)
+        w = cvx.Constant(portfolio.values / value)
+
+        prob_arr = []
+        z_vars = []
+
+        # planning_periods = self.lookahead_model.get_periods(t)
+        for tau in self.trading_times[self.trading_times.index(t): self.trading_times.index(t) + self.lookahead_periods]:
+            # delta_t in [pd.Timedelta('%d days' % i) for i in
+            # range(self.lookahead_periods)]:
+            #            tau = t + delta_t
+            z = cvx.Variable(*w.shape)
+            wplus = w + z
+
+            if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(self.returns_index, BaseReturnsModel):
+                # TODO: determine if my index returns are properly calculated
+                diff = cvx.pos(self.returns_index.weight_expr_ahead(t, tau) - self.return_forecast.weight_expr_ahead(t, tau, wplus))
+                tracking_term = cvx.huber(diff,0.1)
+            else:
+                # TODO: Properly implement this if I want
+                # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
+                # tracking_term = cvx.sum(cvx.multiply(
+                #     values_in_time(self.return_forecast, t).values,
+                #     wplus))
+                logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
+
+            assert(tracking_term.is_convex())
+
+            costs, constraints = [], []
+
+            for cost in self.costs:
+                cost_expr, const_expr = cost.weight_expr(t, wplus, z, value)
+                costs.append(cost_expr)
+                constraints += const_expr
+
+            for item in (con.weight_expr(t, wplus, z, value) for con in self.constraints):
+                if isinstance(item, list):
+                    constraints += item
+                else :
+                    constraints += [item] 
+
+            for el in costs:
+                assert (el.is_convex())
+
+            for el in constraints:
+                assert (el.is_dcp())
+
+            obj = cvx.Minimize(tracking_term + sum(costs))
+            prob = cvx.Problem(
+                obj,
+                [cvx.sum(z) == 0] + constraints,
+                )
+            prob_arr.append(prob)
+            z_vars.append(z)
+            w = wplus
+
+        # Terminal constraint.
+        if self.terminal_weights is not None:
+            prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
+
+        # We are summing all problems in order to obtain overall objective
         sum(prob_arr).solve(solver=self.solver)
         return pd.Series(index=portfolio.index,
                          data=(z_vars[0].value * value))

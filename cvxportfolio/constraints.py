@@ -25,7 +25,7 @@ from .utils import values_in_time
 
 __all__ = ['LongOnly', 'LeverageLimit', 'LongCash', 'DollarNeutral', 'MaxTrade',
            'MaxWeights', 'MinWeights', 'FactorMaxLimit', 'FactorMinLimit',
-           'FixedAlpha']
+           'FixedAlpha', 'Cardinality']
 
 
 class BaseConstraint(object):
@@ -255,3 +255,36 @@ class FixedAlpha(BaseConstraint):
     def _weight_expr(self, t, w_plus, z, v):
         return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == \
             values_in_time(self.alpha_target, t)
+
+
+# TODO: Determine if it's better to implement these classes here or simply import baseconstraint class
+# and implement in notebook
+class Cardinality(BaseConstraint):
+    """A constraint to impose cardinality constraint on portfolio
+    TODO: Implement this
+    """
+
+    def __init__(self, limit, **kwargs):
+        super(Cardinality, self).__init__(**kwargs)
+        self.limit = limit
+    
+    def _weight_expr(self, t, w_plus, z, v):
+        t = cvx.Variable(w_plus[:-1].shape[0], boolean=True)
+        constr = []
+        constr += [sum(t) == self.limit]
+        constr += [w_plus[:-1] - t <= 0]
+        return constr
+
+
+# class TrackingErrorMax(BaseConstraint):
+#     """A constraint to impose cardinality constraint on portfolio
+#     TODO: Implement this
+#     """
+
+#     def init(self, limit, **kwargs):
+#         super(TrackingErrorMax, self).__init__(**kwargs)
+#         self.limit = limit
+    
+#     def _weight_expr(self, t, w_plus, z, v):
+#         # TODO: see if this works...
+#         return  (w_plus - self.w_track).T @ self.Q @ (w_plus - self.w_track) <= values_in_time(self.limit, t)

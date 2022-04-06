@@ -34,6 +34,9 @@ def values_in_time(obj, t, tau=None):
     Optionally specify time tau>=t for which we want a prediction,
     otherwise it is assumed tau = t.
 
+    Alex: If it's a pd obj it will get the value at time t (till tau if passed), otherwise 
+    it will simply return the passed obj
+
     obj: callable, pd.Series, pd.DataFrame, or something else.
 
         If a callable, we return obj(t,tau).

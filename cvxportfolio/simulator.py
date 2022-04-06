@@ -82,13 +82,18 @@ class MarketSimulator():
 
         u[self.cash_key] = - sum(u[u.index != self.cash_key]) - sum(costs)
         hplus[self.cash_key] = h[self.cash_key] + u[self.cash_key]
+        
+        # logging.info(hplus.index.sort_values())
+        # logging.info(self.market_returns.columns.sort_values())
 
         assert (hplus.index.sort_values().equals(
             self.market_returns.columns.sort_values()))
         h_next = self.market_returns.loc[t] * hplus + hplus
 
-        assert (not h_next.isnull().values.any())
-        assert (not u.isnull().values.any())
+        # assert (not h_next.isnull().values.any())
+        # assert (not u.isnull().values.any())
+        assert (not h_next.isnull().values.all())
+        assert (not u.isnull().values.all())
         return h_next, u
 
     def run_backtest(self, initial_portfolio, start_time, end_time,
@@ -108,16 +113,21 @@ class MarketSimulator():
             (self.market_returns.index <= end_time)]
         logging.info('Backtest started, from %s to %s' %
                      (simulation_times[0], simulation_times[-1]))
-
+        # diffs = {}
         for t in simulation_times:
             logging.info('Getting trades at time %s' % t)
             start = time.time()
             try:
+                # u, diff = policy.get_trades(h, t)
                 u = policy.get_trades(h, t)
-            except cvx.SolverError:
+            except Exception as e:
                 logging.warning(
                     'Solver failed on timestamp %s. Default to no trades.' % t)
+                print(e)
                 u = pd.Series(index=h.index, data=0.)
+            # diffs[t] = diff.value
+            # print(self.cash_key in u.index)
+            # print(self.cash_key in h.index)
             end = time.time()
             assert (not pd.isnull(u).any())
             results.log_policy(t, end - start)
@@ -126,12 +136,14 @@ class MarketSimulator():
             start = time.time()
             h, u = self.propagate(h, u, t)
             end = time.time()
-            assert (not h.isnull().values.any())
+            # assert (not h.isnull().values.any())
+            assert (not h.isnull().values.all())
             results.log_simulation(t=t, u=u, h_next=h,
                                    risk_free_return=self.market_returns.loc[
                                        t, self.cash_key],
                                    exec_time=end - start)
-
+        # pd_diff = pd.DataFrame(diffs)
+        # pd_diff.to_csv("diffs.csv")
         logging.info('Backtest ended, from %s to %s' %
                      (simulation_times[0], simulation_times[-1]))
         return results
