@@ -103,10 +103,16 @@ class HcostModel(BaseCost):
         return sum(self.last_cost)
 
     def optimization_log(self, t):
-        return self.expression.value
+        try:
+            return self.expression.value
+        except:
+            return np.NaN
 
     def simulation_log(self, t):
-        return self.last_cost
+        try:
+            return self.last_cost
+        except:
+            return np.NaN
 
 
 class TcostModel(BaseCost):
@@ -208,7 +214,10 @@ class TcostModel(BaseCost):
 
     def simulation_log(self, t):
         # TODO find another way
-        return self.tmp_tcosts
+        try:
+            return self.tmp_tcosts
+        except:
+            return np.NaN
 
     def _estimate_ahead(self, t, tau, w_plus, z, value):
         """Returns the estimate at time t of tcost at time tau.
