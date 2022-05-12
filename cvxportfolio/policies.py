@@ -21,7 +21,7 @@ import pandas as pd
 import numpy as np
 import logging
 import cvxpy as cvx
-import numdifftools as nd
+# import numdifftools as nd
 import traceback
 import sys
 
@@ -40,10 +40,10 @@ __all__ = [
     "MultiPeriodOpt",
     "ProportionalTrade",
     "RankAndLongShort",
-    "TrackingMultiPeriodOpt",
     "PosTrackingSinglePeriodOpt",
     "QuadTrackingSinglePeriodOpt",
     "CardTrackingSinglePeriodOpt",
+    "QuadTrackingMultiPeriodOpt",
 ]
 
 
@@ -557,11 +557,13 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(
             self.returns_index, BaseReturnsModel
         ):
-            diff = cvx.square(
+            diff = cvx.norm(
                 self.returns_index.weight_expr(t)
-                - self.return_forecast.weight_expr(t, wplus)
+                - self.return_forecast.weight_expr(t, wplus),
+                2,
             )
-            tracking_term = cvx.huber(diff, 0.1)
+            # tracking_term = cvx.huber(diff, 0.1)
+            tracking_term = diff
         else:
             # TODO: Properly implement this if I want
             # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
@@ -610,7 +612,9 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
 
 
 class CardTrackingSinglePeriodOpt(BasePolicy):
-    """Single-period optimization policy.
+    """Single-period optimization policy - WIP.
+
+    This is my final optimizatin portfolio class used for TDF idea.
 
     Implements the model developed in chapter 4 of our paper
     https://stanford.edu/~boyd/papers/cvx_portfolio.html
@@ -623,7 +627,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
         costs,
         constraints,
         cardinality,
-        epsilon=10 ^ -1,
+        epsilon=10**-1,
         max_iter=100,
         h=0.1,
         penalty=1,
@@ -693,13 +697,13 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
         self.y = cvx.Parameter(shape=w.size, value=arr)
 
         iter = 0
-        delta = 0
+        delta = self.epsilon
 
         while not self._endloop(iter, delta):
-            if iter == 0:
-                prev_wplus = np.zeros(w.size)
-            else:
+            # Store values from x(t-1)
+            if not iter == 0:
                 prev_wplus = self.wplus.value
+                prev_f = self.prob.value
             # TODO: See if it makes sense to include opt in f(x)
             obj, constraints = self.f(value, t, u)
             self.prob = cvx.Problem(
@@ -738,9 +742,16 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
             )
 
             # Update stopping criteria stuff
-            iter += 1
-            delta = np.linalg.norm(self.wplus.value - prev_wplus)
 
+            # Currently delta is only f(xt+1)-f(xt)/f(xt)
+            # TODO: Include g(x) but g(x) is a vector so not sure how to include it
+            if iter == 0:
+                delta = self.epsilon
+            else:
+                delta = (prev_f - self.prob.value) / prev_f
+
+            iter += 1
+        print(iter)
         return pd.Series(index=portfolio.index, data=(self.z.value * value))
 
     def f(self, portf_value, t, u):
@@ -762,6 +773,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
             logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
 
         # Penalty for distance from sparse vector
+        # TODO: Understand the penalty factor rho
         pen = self.penalty * cvx.sum_squares(self.wplus - (self.y - u))
         # pen = 0
         assert tracking_term.is_convex()
@@ -811,7 +823,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
             logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
 
         # Penalty for distance from sparse vector
-        pen = self.penalty * cvx.sum_squares(w - (y - u))
+        pen = self.penalty * cvx.norm(w - (y - u), 1)
         # pen = 0
         # Initialize Constraints
 
@@ -870,8 +882,9 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
         else:
             return val
 
-    def _max_grad(self, f, x):
-        return np.max(np.abs(nd.Gradient(f)(x)))
+    # def _max_grad(self, f, x):
+    #   this uses numdifftools
+    #     return np.max(np.abs(nd.Gradient(f)(x)))
 
     # a function that return one standard basis function
     def _basis_vec(self, ndim, index):
@@ -932,7 +945,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
             return False
 
 
-class TrackingMultiPeriodOpt(PosTrackingSinglePeriodOpt):
+class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
     def __init__(
         self, trading_times, terminal_weights, lookahead_periods=None, *args, **kwargs
     ):
@@ -946,7 +959,7 @@ class TrackingMultiPeriodOpt(PosTrackingSinglePeriodOpt):
         self.lookahead_periods = lookahead_periods
         self.trading_times = trading_times
         self.terminal_weights = terminal_weights
-        super(TrackingMultiPeriodOpt, self).__init__(*args, **kwargs)
+        super(QuadTrackingMultiPeriodOpt, self).__init__(*args, **kwargs)
 
     def get_trades(self, portfolio, t=dt.datetime.today()):
 
@@ -971,12 +984,13 @@ class TrackingMultiPeriodOpt(PosTrackingSinglePeriodOpt):
             if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(
                 self.returns_index, BaseReturnsModel
             ):
-                # TODO: determine if my index returns are properly calculated
-                diff = cvx.pos(
-                    self.returns_index.weight_expr_ahead(t, tau)
-                    - self.return_forecast.weight_expr_ahead(t, tau, wplus)
+                diff = cvx.norm(
+                    self.returns_index.weight_expr(t)
+                    - self.return_forecast.weight_expr_ahead(t, tau, wplus),
+                    2,
                 )
-                tracking_term = cvx.huber(diff, 0.1)
+                # tracking_term = cvx.huber(diff, 0.1)
+                tracking_term = diff
             else:
                 # TODO: Properly implement this if I want
                 # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
@@ -992,7 +1006,7 @@ class TrackingMultiPeriodOpt(PosTrackingSinglePeriodOpt):
             costs, constraints = [], []
 
             for cost in self.costs:
-                cost_expr, const_expr = cost.weight_expr(t, wplus, z, value)
+                cost_expr, const_expr = cost.weight_expr_ahead(t, tau, wplus, z, value)
                 costs.append(cost_expr)
                 constraints += const_expr
 
@@ -1024,5 +1038,18 @@ class TrackingMultiPeriodOpt(PosTrackingSinglePeriodOpt):
             prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
 
         # We are summing all problems in order to obtain overall objective
-        sum(prob_arr).solve(solver=self.solver)
-        return pd.Series(index=portfolio.index, data=(z_vars[0].value * value))
+        self.prob = sum(prob_arr)
+        try:
+            self.prob.solve(solver=self.solver, **self.solver_opts)
+            if self.prob.status == "unbounded":
+                logging.error("The problem is unbounded. Defaulting to no trades")
+                return self._nulltrade(portfolio)
+
+            if self.prob.status == "infeasible":
+                logging.error("The problem is infeasible. Defaulting to no trades")
+                return self._nulltrade(portfolio)
+            return pd.Series(index=portfolio.index, data=(z_vars[0].value * value))
+        except (cvx.SolverError, TypeError) as e:
+            logging.error(e)
+            logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
+            return self._nulltrade(portfolio)

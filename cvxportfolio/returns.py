@@ -107,6 +107,7 @@ class MPOReturnsForecast(BaseReturnsModel):
         Returns:
           An expression for the alpha.
         """
+        temp = self.alpha_data[(t, tau)].values.T
         return self.alpha_data[(t, tau)].values.T @ wplus
 
 
