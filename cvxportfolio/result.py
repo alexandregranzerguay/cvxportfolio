@@ -23,14 +23,13 @@ from .policies import MultiPeriodOpt
 
 
 def getFiscalQuarter(dt):
-    """Convert a time to a fiscal quarter.
-    """
+    """Convert a time to a fiscal quarter."""
     year = dt.year
     quarter = (dt.month - 1) // 3 + 1
     return "Q%i %s" % (quarter, year)
 
 
-class SimulationResult():
+class SimulationResult:
     """A container for the result of a simulation.
 
     Attributes:
@@ -40,9 +39,16 @@ class SimulationResult():
         borrow_costs: A series of borrow costs over time.
     """
 
-    def __init__(self, initial_portfolio, policy, cash_key, simulator,
-                 simulation_times=None, PPY=252,
-                 timedelta=pd.Timedelta("1 days")):
+    def __init__(
+        self,
+        initial_portfolio,
+        policy,
+        cash_key,
+        simulator,
+        simulation_times=None,
+        PPY=252,
+        timedelta=pd.Timedelta("1 days"),
+    ):
         """
         Initialize the result object.
 
@@ -65,49 +71,41 @@ class SimulationResult():
         print(self._summary_string())
 
     def _summary_string(self):
-        data = collections.OrderedDict({
-            'Number of periods':
-                self.u.shape[0],
-            'Initial timestamp':
-                self.h.index[0],
-            'Final timestamp':
-                self.h.index[-1],
-            'Portfolio return (%)':
-                self.returns.mean() * 100 * self.PPY,
-            'Excess return (%)':
-                self.excess_returns.mean() * 100 * self.PPY,
-            'Excess risk (%)':
-                self.excess_returns.std() * 100 * np.sqrt(self.PPY),
-            'Sharpe ratio':
-                self.sharpe_ratio,
-            'Max. drawdown':
-                self.max_drawdown,
-            'Turnover (%)':
-                self.turnover.mean() * 100 * self.PPY,
-            'Average policy time (sec)':
-                self.policy_time.mean(),
-            'Average simulator time (sec)':
-                self.simulation_time.mean(),
-        })
+        data = collections.OrderedDict(
+            {
+                "Number of periods": self.u.shape[0],
+                "Initial timestamp": self.h.index[0],
+                "Final timestamp": self.h.index[-1],
+                "Portfolio return (%)": self.returns.mean() * 100 * self.PPY,
+                "Excess return (%)": self.excess_returns.mean() * 100 * self.PPY,
+                "Excess risk (%)": self.excess_returns.std() * 100 * np.sqrt(self.PPY),
+                "Sharpe ratio": self.sharpe_ratio,
+                "Max. drawdown": self.max_drawdown,
+                "Turnover (%)": self.turnover.mean() * 100 * self.PPY,
+                "Average policy time (sec)": self.policy_time.mean(),
+                "Average simulator time (sec)": self.simulation_time.mean(),
+                "Total cost of trading": self.total_trade_cost.sum(),
+            }
+        )
 
-        return (pd.Series(data=data).
-                to_string(float_format='{:,.3f}'.format))
+        return pd.Series(data=data).to_string(float_format="{:,.3f}".format)
 
     def log_data(self, name, t, entry):
         try:
             getattr(self, name).loc[t] = entry
         except AttributeError:
-            setattr(self, name,
-                    (pd.Series if np.isscalar(entry) else
-                     pd.DataFrame)(index=[t], data=[entry]))
+            setattr(
+                self,
+                name,
+                (pd.Series if np.isscalar(entry) else pd.DataFrame)(index=[t], data=[entry]),
+            )
 
     def log_policy(self, t, exec_time):
         self.log_data("policy_time", t, exec_time)
         # TODO mpo policy requires changes in the optimization_log methods
         if not isinstance(self.policy, MultiPeriodOpt):
             for cost in self.policy.costs:
-                self.log_data("policy_" + cost.__class__.__name__,
-                              t, cost.optimization_log(t))
+                self.log_data("policy_" + cost.__class__.__name__, t, cost.optimization_log(t))
 
     def log_simulation(self, t, u, h_next, risk_free_return, exec_time):
         self.log_data("simulation_time", t, exec_time)
@@ -115,8 +113,7 @@ class SimulationResult():
         self.log_data("h_next", t, h_next)
         self.log_data("risk_free_returns", t, risk_free_return)
         for cost in self.simulator.costs:
-            self.log_data("simulator_" + cost.__class__.__name__,
-                          t, cost.simulation_log(t))
+            self.log_data("simulator_" + cost.__class__.__name__, t, cost.simulation_log(t))
 
     @property
     def h(self):
@@ -125,7 +122,7 @@ class SimulationResult():
 
         """
         tmp = self.h_next.copy()
-        tmp.loc['last'] = np.nan
+        tmp.loc["last"] = np.nan
         tmp = self.h_next.shift(1)
         tmp.iloc[0] = self.initial_portfolio
         # TODO fix ?
@@ -134,8 +131,7 @@ class SimulationResult():
 
     @property
     def v(self):
-        """The value of the portfolio over time.
-        """
+        """The value of the portfolio over time."""
         return self.h.sum(axis=1)
 
     @property
@@ -165,11 +161,9 @@ class SimulationResult():
 
     @property
     def returns(self):
-        """The returns R_t = (v_{t+1}-v_t)/v_t
-        """
+        """The returns R_t = (v_{t+1}-v_t)/v_t"""
         val = self.v
-        return pd.Series(data=val.values[1:] / val.values[:-1] - 1,
-                         index=val.index[:-1])
+        return pd.Series(data=val.values[1:] / val.values[:-1] - 1, index=val.index[:-1])
 
     @property
     def growth_rates(self):
@@ -178,25 +172,21 @@ class SimulationResult():
 
     @property
     def annual_growth_rate(self):
-        """The annualized growth rate PPY/T sum_{t=1}^T log(v_{t+1}/v_t)
-        """
+        """The annualized growth rate PPY/T sum_{t=1}^T log(v_{t+1}/v_t)"""
         return self.growth_rates.sum() * self.PPY / self.growth_rates.size
 
     @property
     def annual_return(self):
-        """The annualized return in percent.
-        """
+        """The annualized return in percent."""
         ret = self.growth_rates
         return self._growth_to_return(ret.mean())
 
     def _growth_to_return(self, growth):
-        """Convert growth to annualized percentage return.
-        """
+        """Convert growth to annualized percentage return."""
         return 100 * (np.exp(self.PPY * growth) - 1)
 
     def get_quarterly_returns(self, benchmark=None):
-        """The annualized returns for each fiscal quarter.
-        """
+        """The annualized returns for each fiscal quarter."""
         ret = self.growth_rates
         quarters = ret.groupby(getFiscalQuarter).aggregate(np.mean)
         return self._growth_to_return(quarters)
@@ -209,32 +199,35 @@ class SimulationResult():
         ret = self.get_quarterly_returns(benchmark)
         return (ret.argmin(), ret.min())
 
+    def get_daily_trade_cost(self):
+        return self.simulator_TcostModel.sum(axis=1)
+
     @property
     def excess_returns(self):
         return self.returns - self.risk_free_returns
 
     @property
     def sharpe_ratio(self):
-        return np.sqrt(self.PPY) * np.mean(self.excess_returns) / \
-            np.std(self.excess_returns)
+        return np.sqrt(self.PPY) * np.mean(self.excess_returns) / np.std(self.excess_returns)
 
     @property
     def turnover(self):
-        """Turnover ||u_t||_1/v_t
-        """
+        """Turnover ||u_t||_1/v_t"""
         noncash_trades = self.u.drop(self.cash_key, axis=1)
         return np.abs(noncash_trades).sum(axis=1) / self.v
 
     @property
+    def total_trade_cost(self):
+        return self.get_daily_trade_cost()
+
+    @property
     def trading_days(self):
-        """The fraction of days with nonzero turnover.
-        """
+        """The fraction of days with nonzero turnover."""
         return (self.turnover.values > 0).sum() / self.turnover.size
 
     @property
     def max_drawdown(self):
-        """The maximum peak to trough drawdown in percent.
-        """
+        """The maximum peak to trough drawdown in percent."""
         val_arr = self.v.values
         max_dd_so_far = 0
         cur_max = val_arr[0]
@@ -244,3 +237,8 @@ class SimulationResult():
             elif 100 * (cur_max - val) / cur_max > max_dd_so_far:
                 max_dd_so_far = 100 * (cur_max - val) / cur_max
         return max_dd_so_far
+
+    @property
+    def index_returns(self):
+        index_ret = np.sum(self.w_index * self.market_returns, axis="columns")
+        return index_ret.add(1, fill_value=0).cumprod() * self.v.iloc[0]

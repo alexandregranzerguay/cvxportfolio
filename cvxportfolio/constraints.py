@@ -19,20 +19,32 @@ from abc import ABCMeta, abstractmethod
 
 import cvxpy as cvx
 import numpy as np
+import pandas as pd
 
 from .utils import values_in_time
 
 
-__all__ = ['LongOnly', 'LeverageLimit', 'LongCash', 'DollarNeutral', 'MaxTrade',
-           'MaxWeights', 'MinWeights', 'FactorMaxLimit', 'FactorMinLimit',
-           'FixedAlpha', 'Cardinality']
+__all__ = [
+    "LongOnly",
+    "LeverageLimit",
+    "LongCash",
+    "DollarNeutral",
+    "MaxTrade",
+    "MaxWeights",
+    "MinWeights",
+    "FactorMaxLimit",
+    "FactorMinLimit",
+    "FixedAlpha",
+    "Cardinality",
+    "TrackingErrorMax",
+]
 
 
 class BaseConstraint(object):
     __metaclass__ = ABCMeta
 
     def __init__(self, **kwargs):
-        self.w_bench = kwargs.pop('w_bench', 0.)
+        self.w_bench = kwargs.pop("w_bench", 0.0)
 
     def weight_expr(self, t, w_plus, z, v):
         """Returns a list of trade constraints.
@@ -53,8 +65,7 @@ class BaseConstraint(object):
 
 
 class MaxTrade(BaseConstraint):
-    """A limit on maximum trading size.
-    """
+    """A limit on maximum trading size."""
 
     def __init__(self, ADVs, max_fraction=0.05, **kwargs):
         self.ADVs = ADVs
@@ -70,13 +81,14 @@ class MaxTrade(BaseConstraint):
           z: trade weights
           v: portfolio value
         """
-        return cvx.abs(z[:-1]) * v <= \
-            np.array(values_in_time(self.ADVs, t)) * self.max_fraction
+        return (
+            cvx.abs(z[:-1]) * v
+            <= np.array(values_in_time(self.ADVs, t)) * self.max_fraction
+        )
 
 
 class LongOnly(BaseConstraint):
-    """A long only constraint.
-    """
+    """A long only constraint."""
 
     def __init__(self, **kwargs):
         super(LongOnly, self).__init__(**kwargs)
@@ -113,8 +125,7 @@ class LeverageLimit(BaseConstraint):
 
 
 class LongCash(BaseConstraint):
-    """Requires that cash be non-negative.
-    """
+    """Requires that cash be non-negative."""
 
     def __init__(self, **kwargs):
         super(LongCash, self).__init__(**kwargs)
@@ -130,8 +141,7 @@ class LongCash(BaseConstraint):
 
 
 class DollarNeutral(BaseConstraint):
-    """Long-short dollar neutral strategy.
-    """
+    """Long-short dollar neutral strategy."""
 
     def __init__(self, **kwargs):
         super(DollarNeutral, self).__init__(**kwargs)
@@ -209,8 +219,9 @@ class FactorMaxLimit(BaseConstraint):
             t: time
             w_plus: holdings
         """
-        return values_in_time(self.factor_exposure, t).T @ w_plus[:-1] <= \
-            values_in_time(self.limit, t)
+        return values_in_time(self.factor_exposure, t).T @ w_plus[
+            :-1
+        ] <= values_in_time(self.limit, t)
 
 
 class FactorMinLimit(BaseConstraint):
@@ -234,8 +245,9 @@ class FactorMinLimit(BaseConstraint):
             t: time
             w_plus: holdings
         """
-        return values_in_time(self.factor_exposure, t).T @ w_plus[:-1] >= \
-            values_in_time(self.limit, t)
+        return values_in_time(self.factor_exposure, t).T @ w_plus[
+            :-1
+        ] >= values_in_time(self.limit, t)
 
 
 class FixedAlpha(BaseConstraint):
@@ -253,8 +265,9 @@ class FixedAlpha(BaseConstraint):
         self.alpha_target = alpha_target
 
     def _weight_expr(self, t, w_plus, z, v):
-        return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == \
-            values_in_time(self.alpha_target, t)
+        return values_in_time(self.return_forecast, t).T @ w_plus[
+            :-1
+        ] == values_in_time(self.alpha_target, t)
 
 
 # TODO: Determine if it's better to implement these classes here or simply import baseconstraint class
@@ -267,7 +280,7 @@ class Cardinality(BaseConstraint):
     def __init__(self, limit, **kwargs):
         super(Cardinality, self).__init__(**kwargs)
         self.limit = limit
-    
+
     def _weight_expr(self, t, w_plus, z, v):
         t = cvx.Variable(w_plus[:-1].shape[0], boolean=True)
         constr = []
@@ -276,15 +289,43 @@ class Cardinality(BaseConstraint):
         return constr
 
 
-# class TrackingErrorMax(BaseConstraint):
-#     """A constraint to impose cardinality constraint on portfolio
-#     TODO: Implement this
-#     """
+class TrackingErrorMax(BaseConstraint):
+    """A constraint to impose tracking error
 
-#     def init(self, limit, **kwargs):
-#         super(TrackingErrorMax, self).__init__(**kwargs)
-#         self.limit = limit
-    
-#     def _weight_expr(self, t, w_plus, z, v):
-#         # TODO: see if this works...
-#         return  (w_plus - self.w_track).T @ self.Q @ (w_plus - self.w_track) <= values_in_time(self.limit, t)
+    Attributes:
+        sigma : covariance matrix
+        w_index: tracked index weights
+    """
+
+    def __init__(self, Sigma, float_shares, index_prices, limit, **kwargs):
+        self.Sigma = Sigma  # Sigma is either a matrix or a pd.Panel
+        self.float_shares = float_shares
+        self.index_prices = index_prices
+        self.limit = limit
+        try:
+            assert not pd.isnull(Sigma).values.any()
+        except AttributeError:
+            assert not pd.isnull(Sigma).any()
+        super(TrackingErrorMax, self).__init__(**kwargs)
+
+    def weight_expr(self, t, w_plus, z, value):
+        self.w_bench = self._get_index_weights(t)
+        self.expression = self._estimate(t, w_plus - self.w_bench, z, value)
+        return self.expression <= values_in_time(self.limit, t)
+
+    def _estimate(self, t, wplus, z, value):
+        try:
+            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t))
+        except TypeError:
+            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t).values)
+        return self.expression
+
+    def _get_index_weights(self, t):
+        market_cap = (
+            self.float_shares["float_shares"]
+            .multiply(values_in_time(self.index_prices, t))
+            .fillna(0)
+        )
+        index_weights = market_cap / market_cap.sum()
+        index_weights["Cash"] = 0
+        return index_weights

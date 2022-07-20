@@ -21,14 +21,15 @@ import pandas as pd
 import numpy as np
 import logging
 import cvxpy as cvx
+
 # import numdifftools as nd
 import traceback
 import sys
 
-from cvxportfolio.costs import BaseCost
-from cvxportfolio.returns import BaseReturnsModel
-from cvxportfolio.constraints import BaseConstraint, Cardinality
-from cvxportfolio.utils import values_in_time, null_checker
+from .costs import BaseCost
+from .returns import BaseReturnsModel
+from .constraints import BaseConstraint, TrackingErrorMax
+from .utils import values_in_time, null_checker
 
 
 __all__ = [
@@ -119,9 +120,7 @@ class ProportionalTrade(BasePolicy):
 
     def get_trades(self, portfolio, t=dt.datetime.today()):
         try:
-            missing_time_steps = len(self.time_steps) - next(
-                i for (i, x) in enumerate(self.time_steps) if x == t
-            )
+            missing_time_steps = len(self.time_steps) - next(i for (i, x) in enumerate(self.time_steps) if x == t)
         except StopIteration:
             raise Exception("ProportionalTrade can only trade on the given time steps")
         deviation = self.targetweight - portfolio / sum(portfolio)
@@ -179,20 +178,12 @@ class PeriodicRebalance(BaseRebalance):
         super(PeriodicRebalance, self).__init__()
 
     def is_start_period(self, t):
-        result = (
-            not getattr(t, self.period) == getattr(self.last_t, self.period)
-            if hasattr(self, "last_t")
-            else True
-        )
+        result = not getattr(t, self.period) == getattr(self.last_t, self.period) if hasattr(self, "last_t") else True
         self.last_t = t
         return result
 
     def get_trades(self, portfolio, t=dt.datetime.today()):
-        return (
-            self._rebalance(portfolio)
-            if self.is_start_period(t)
-            else self._nulltrade(portfolio)
-        )
+        return self._rebalance(portfolio) if self.is_start_period(t) else self._nulltrade(portfolio)
 
 
 class AdaptiveRebalance(BaseRebalance):
@@ -220,9 +211,7 @@ class SinglePeriodOpt(BasePolicy):
     https://stanford.edu/~boyd/papers/cvx_portfolio.html
     """
 
-    def __init__(
-        self, return_forecast, costs, constraints, solver=None, solver_opts=None
-    ):
+    def __init__(self, return_forecast, costs, constraints, solver=None, solver_opts=None):
 
         if not isinstance(return_forecast, BaseReturnsModel):
             null_checker(return_forecast)
@@ -264,9 +253,7 @@ class SinglePeriodOpt(BasePolicy):
         if isinstance(self.return_forecast, BaseReturnsModel):
             alpha_term = self.return_forecast.weight_expr(t, wplus)
         else:
-            alpha_term = cvx.sum(
-                cvx.multiply(values_in_time(self.return_forecast, t).values, wplus)
-            )
+            alpha_term = cvx.sum(cvx.multiply(values_in_time(self.return_forecast, t).values, wplus))
 
         assert alpha_term.is_concave()
 
@@ -277,12 +264,7 @@ class SinglePeriodOpt(BasePolicy):
             costs.append(cost_expr)
             constraints += const_expr
 
-        constraints += [
-            item
-            for item in (
-                con.weight_expr(t, wplus, z, value) for con in self.constraints
-            )
-        ]
+        constraints += [item for item in (con.weight_expr(t, wplus, z, value) for con in self.constraints)]
 
         for el in costs:
             assert el.is_convex()
@@ -290,9 +272,7 @@ class SinglePeriodOpt(BasePolicy):
         for el in constraints:
             assert el.is_dcp()
 
-        self.prob = cvx.Problem(
-            cvx.Maximize(alpha_term - sum(costs)), [cvx.sum(z) == 0] + constraints
-        )
+        self.prob = cvx.Problem(cvx.Maximize(alpha_term - sum(costs)), [cvx.sum(z) == 0] + constraints)
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
 
@@ -330,9 +310,7 @@ class SinglePeriodOpt(BasePolicy):
 
 
 class MultiPeriodOpt(SinglePeriodOpt):
-    def __init__(
-        self, trading_times, terminal_weights, lookahead_periods=None, *args, **kwargs
-    ):
+    def __init__(self, trading_times, terminal_weights, lookahead_periods=None, *args, **kwargs):
         """
         trading_times: list, all times at which get_trades will be called
         lookahead_periods: int or None. if None uses all remaining periods
@@ -355,8 +333,7 @@ class MultiPeriodOpt(SinglePeriodOpt):
 
         # planning_periods = self.lookahead_model.get_periods(t)
         for tau in self.trading_times[
-            self.trading_times.index(t) : self.trading_times.index(t)
-            + self.lookahead_periods
+            self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
         ]:
             # delta_t in [pd.Timedelta('%d days' % i) for i in
             # range(self.lookahead_periods)]:
@@ -444,13 +421,8 @@ class PosTrackingSinglePeriodOpt(BasePolicy):
         z = cvx.Variable(w.size)  # TODO pass index
         wplus = w.values + z
 
-        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(
-            self.returns_index, BaseReturnsModel
-        ):
-            diff = cvx.pos(
-                self.returns_index.weight_expr(t)
-                - self.return_forecast.weight_expr(t, wplus)
-            )
+        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(self.returns_index, BaseReturnsModel):
+            diff = cvx.pos(self.returns_index.weight_expr(t) - self.return_forecast.weight_expr(t, wplus))
             tracking_term = cvx.huber(diff, 0.1)
         else:
             # TODO: Properly implement this if I want
@@ -509,17 +481,35 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
     def __init__(
         self,
         return_forecast,
-        returns_index,
+        # returns_index,
+        # index_weights,
+        # Q,
+        # TE,
+        index_prices,
+        float_shares,
         costs,
         constraints,
+        gamma_excess,
         solver=None,
         solver_opts=None,
+        index_value=None,
+        **kwargs,
     ):
 
         if not isinstance(return_forecast, BaseReturnsModel):
             null_checker(return_forecast)
         self.return_forecast = return_forecast
-        self.returns_index = returns_index
+        self.index_prices = index_prices
+        self.index_value = index_value
+        self.float_shares = float_shares
+        self.gamma_excess = gamma_excess
+        # self.returns_index = returns_index
+        # self.index_weights = index_weights
+        # self.TE = TE
+        # self.Q = Q
+
+        # Add any other keyword args to the class dict
+        self.__dict__.update(kwargs)
 
         super(QuadTrackingSinglePeriodOpt, self).__init__()
 
@@ -553,17 +543,18 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         w = portfolio / value
         z = cvx.Variable(w.size)  # TODO pass index
         wplus = w.values + z
+        w_index = self._get_index_weights(t)
+        w_index["Cash"] = 0
 
-        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(
-            self.returns_index, BaseReturnsModel
-        ):
-            diff = cvx.norm(
-                self.returns_index.weight_expr(t)
-                - self.return_forecast.weight_expr(t, wplus),
-                2,
-            )
+        if isinstance(self.return_forecast, BaseReturnsModel):
+            # diff = cvx.norm(
+            #     self.returns_index.weight_expr(t)
+            #     - self.return_forecast.weight_expr(t, wplus),
+            #     2,
+            # )
             # tracking_term = cvx.huber(diff, 0.1)
-            tracking_term = diff
+            # tracking_term = diff
+            ret = self.gamma_excess * self.return_forecast.weight_expr(t, (wplus - w_index))
         else:
             # TODO: Properly implement this if I want
             # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
@@ -572,7 +563,8 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
             #     wplus))
             logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
 
-        assert tracking_term.is_convex()
+        # assert tracking_term.is_convex()
+        assert ret.is_convex()
 
         costs, constraints = [], []
 
@@ -593,7 +585,8 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         for el in constraints:
             assert el.is_dcp()
 
-        obj = cvx.Minimize(tracking_term + sum(costs))
+        # obj = cvx.Minimize(tracking_term + sum(costs))
+        obj = cvx.Minimize(-ret + sum(costs))
         self.prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
@@ -605,6 +598,165 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(portfolio)
             return pd.Series(index=portfolio.index, data=(z.value * value))
+        except (cvx.SolverError, TypeError) as e:
+            logging.error(e)
+            logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
+            return self._nulltrade(portfolio)
+
+    def _get_index_weights(self, t):
+        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
+        index_weights = market_cap / market_cap.sum()
+        index_weights["Cash"] = 0
+        return index_weights
+
+
+class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
+    def __init__(
+        self, trading_times: list, terminal_weights: pd.DataFrame, lookahead_periods: int = None, *args, **kwargs
+    ):
+        """
+        trading_times: list, all times at which get_trades will be called
+        lookahead_periods: int or None. if None uses all remaining periods
+        index_weights: Dataframe or array of weights at each time t, or constant over time
+        Q: list of Q matrix for each time step
+        """
+        # Number of periods to look ahead.
+        self.lookahead_periods = lookahead_periods
+        self.trading_times = trading_times
+        self.terminal_weights = terminal_weights
+        super(QuadTrackingMultiPeriodOpt, self).__init__(*args, **kwargs)
+
+    # TODO: Check if general function is better
+    # def add_robust(self, box:bool=False, elipsoidal:bool=False, *args, **kwargs):
+    #     if box:
+    #         # check presence of necesary args
+    #         kwords = ["ret_hat", "lambda_robust"]
+    #         for el in kwords:
+    #             if el not in kwargs:
+    #                 print(f"Missing argument {el}")
+
+    def add_robust(self, sigma, gamma):
+        self.sigma = sigma
+        self.gamma_robust = gamma
+
+    def get_trades(self, portfolio, t=dt.datetime.today()):
+
+        value = sum(portfolio)
+        assert value > 0.0
+        w = cvx.Constant(portfolio.values / value)
+        w_index = self._get_index_weights(t)
+        self.w_index = w_index  # used for reporting
+
+        prob_arr = []
+        z_vars = []
+
+        # planning_periods = self.lookahead_model.get_periods(t)
+        for tau in self.trading_times[
+            self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
+        ]:
+            # delta_t in [pd.Timedelta('%d days' % i) for i in
+            # range(self.lookahead_periods)]:
+            #            tau = t + delta_t
+            z = cvx.Variable(*w.shape)
+            wplus = w + z
+
+            if isinstance(self.return_forecast, BaseReturnsModel):
+                # diff = cvx.norm(
+                #     self.returns_index.weight_expr(t)
+                #     - self.return_forecast.weight_expr_ahead(t, tau, wplus),
+                #     2,
+                # )
+
+                #  max mu^T @ (w - w_index)
+                ret = self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus, w_index)
+                # tracking_term = cvx.huber(diff, 0.1)
+                # tracking_term = self.gamma_excess * diff
+                # tracking_error = (wplus - self.index_weights) @ self.Q.weight_expr_ahead(t, tau) @ (wplus - self.index_weights)
+            else:
+                # TODO: Properly implement this if I want
+                # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
+                # tracking_term = cvx.sum(cvx.multiply(
+                #     values_in_time(self.return_forecast, t).values,
+                #     wplus))
+                logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
+
+            if hasattr(self, "gamma_robust"):
+                # Required portfolio robustness
+                var_matr = np.diag(np.diag(values_in_time(self.sigma, tau)))
+                # # Target portfolio return estimation error (r.e.e. bound)
+                # # rob_bnd = np.dot(w0, np.dot(var_matr, w0))
+                # np.dot(w0, np.dot(var_matr, w0))
+                # var_minVar = np.dot(w_minVar, np.dot(Q, w_minVar))
+                # ret_minVar = np.dot(mu, w_minVar)
+                # rob_minVar = np.dot(w_minVar, np.dot(var_matr, w_minVar))
+
+                # Portf_Retn = np.dot(mu, w1.value)  # Estimated returns from minVar
+                # Portf_Retn = ret_minVar * 10
+                # Qq_rMV = var_matr
+                temp = self.gamma_robust * cvx.quad_form(wplus, var_matr)
+                ret = ret - temp
+            else:
+                assert ret.is_convex()
+            # assert tracking_term.is_convex()
+
+            costs, constraints = [], []
+
+            for cost in self.costs:
+                cost_expr, const_expr = cost.weight_expr_ahead(t, tau, wplus, z, value)
+                costs.append(cost_expr)
+                constraints += const_expr
+
+            for item in (con.weight_expr(t, wplus, z, value) for con in self.constraints):
+                if isinstance(item, list):
+                    constraints += item
+                else:
+                    constraints += [item]
+
+            for el in costs:
+                assert el.is_convex()
+
+            for el in constraints:
+                assert el.is_dcp()
+
+            # obj = cvx.Minimize(tracking_term + sum(costs))
+            obj = cvx.Minimize(-ret + sum(costs))
+            prob = cvx.Problem(
+                obj,
+                [cvx.sum(z) == 0] + constraints,
+            )
+            prob_arr.append(prob)
+            z_vars.append(z)
+            w = wplus
+
+            # Using this for troubleshooting/logging
+            # self.index_obj = self.returns_index.weight_expr(t)
+            # self.portfolio_obj = self.return_forecast.weight_expr_ahead(t, tau, wplus)
+            # self.diff_obj = tracking_term
+            # try:
+            #     self.te = costs[2].args[1]
+            # except:
+            #     self.te = constraints[2].args[0]
+        # Terminal constraint.
+        if self.terminal_weights is not None:
+            prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
+
+        # We are summing all problems in order to obtain overall objective
+        self.prob = sum(prob_arr)
+        try:
+            self.prob.solve(solver=self.solver, **self.solver_opts)
+            if self.prob.status == "unbounded":
+                logging.error("The problem is unbounded. Defaulting to no trades")
+                return self._nulltrade(portfolio)
+
+            if self.prob.status == "infeasible":
+                logging.error("The problem is infeasible. Defaulting to no trades")
+                return self._nulltrade(portfolio)
+
+            for con in self.constraints:
+                if isinstance(con, TrackingErrorMax):
+                    self.te = con.expression.value
+
+            return pd.Series(index=portfolio.index, data=(z_vars[0].value * value))
         except (cvx.SolverError, TypeError) as e:
             logging.error(e)
             logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
@@ -690,10 +842,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
         self.z = cvx.Variable(w.size)
         self.wplus = w.values + self.z
         # Initial cardinality compliant array
-        arr = np.array(
-            [value / self.cardinality] * self.cardinality
-            + [0] * (w.size - self.cardinality)
-        )
+        arr = np.array([value / self.cardinality] * self.cardinality + [0] * (w.size - self.cardinality))
         self.y = cvx.Parameter(shape=w.size, value=arr)
 
         iter = 0
@@ -706,9 +855,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
                 prev_f = self.prob.value
             # TODO: See if it makes sense to include opt in f(x)
             obj, constraints = self.f(value, t, u)
-            self.prob = cvx.Problem(
-                cvx.Minimize(obj), [cvx.sum(self.z) == 0] + constraints
-            )
+            self.prob = cvx.Problem(cvx.Minimize(obj), [cvx.sum(self.z) == 0] + constraints)
 
             # Attempt to solve f(x)
             try:
@@ -725,9 +872,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
                     return self._nulltrade(portfolio)
             except (cvx.SolverError, TypeError) as e:
                 logging.error(e)
-                logging.error(
-                    "The solver %s failed. Defaulting to no trades" % self.solver
-                )
+                logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
                 return self._nulltrade(portfolio)
 
             # Optimal weights in g(x)
@@ -737,9 +882,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
             u = u + self.wplus.value - self.y.value
 
             # Update gamma
-            self.gamma = self._max_grad_back(
-                self.wplus.value, self.z.value, self.y.value, u, value, t, self.h
-            )
+            self.gamma = self._max_grad_back(self.wplus.value, self.z.value, self.y.value, u, value, t, self.h)
 
             # Update stopping criteria stuff
 
@@ -756,13 +899,8 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
 
     def f(self, portf_value, t, u):
         # y.value is the current optimal weights from g(x)
-        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(
-            self.returns_index, BaseReturnsModel
-        ):
-            diff = cvx.square(
-                self.returns_index.weight_expr(t)
-                - self.return_forecast.weight_expr(t, self.wplus)
-            )
+        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(self.returns_index, BaseReturnsModel):
+            diff = cvx.square(self.returns_index.weight_expr(t) - self.return_forecast.weight_expr(t, self.wplus))
             tracking_term = cvx.huber(diff, 0.1)
         else:
             # TODO: Properly implement this if I want
@@ -786,10 +924,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
             costs.append(cost_expr)
             constraints += const_expr
 
-        for item in (
-            con.weight_expr(t, self.wplus, self.z, portf_value)
-            for con in self.constraints
-        ):
+        for item in (con.weight_expr(t, self.wplus, self.z, portf_value) for con in self.constraints):
             if isinstance(item, list):
                 constraints += item
             else:
@@ -806,13 +941,8 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
 
     def F(self, w, z, y, u, portf_value, t):
         # y.value is the current optimal weights from g(x)
-        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(
-            self.returns_index, BaseReturnsModel
-        ):
-            diff = cvx.square(
-                self.returns_index.weight_expr(t)
-                - self.return_forecast.weight_expr(t, w)
-            )
+        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(self.returns_index, BaseReturnsModel):
+            diff = cvx.square(self.returns_index.weight_expr(t) - self.return_forecast.weight_expr(t, w))
             tracking_term = cvx.huber(diff, 0.1)
         else:
             # TODO: Properly implement this if I want
@@ -860,9 +990,7 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
 
     def _proj_map(self, val, idx):
         if idx > self.cardinality:
-            return self._saturation(
-                self._soft_thresh(val, self.gamma), self.lower, self.upper
-            )
+            return self._saturation(self._soft_thresh(val, self.gamma), self.lower, self.upper)
         else:
             return self._saturation(val, self.lower, self.upper)
 
@@ -943,113 +1071,3 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
             return True
         else:
             return False
-
-
-class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
-    def __init__(
-        self, trading_times, terminal_weights, lookahead_periods=None, *args, **kwargs
-    ):
-        """
-        trading_times: list, all times at which get_trades will be called
-        lookahead_periods: int or None. if None uses all remaining periods
-        w_track: Dataframe or array of weights at each time t
-        Q: list of Q matrix for each time step
-        """
-        # Number of periods to look ahead.
-        self.lookahead_periods = lookahead_periods
-        self.trading_times = trading_times
-        self.terminal_weights = terminal_weights
-        super(QuadTrackingMultiPeriodOpt, self).__init__(*args, **kwargs)
-
-    def get_trades(self, portfolio, t=dt.datetime.today()):
-
-        value = sum(portfolio)
-        assert value > 0.0
-        w = cvx.Constant(portfolio.values / value)
-
-        prob_arr = []
-        z_vars = []
-
-        # planning_periods = self.lookahead_model.get_periods(t)
-        for tau in self.trading_times[
-            self.trading_times.index(t) : self.trading_times.index(t)
-            + self.lookahead_periods
-        ]:
-            # delta_t in [pd.Timedelta('%d days' % i) for i in
-            # range(self.lookahead_periods)]:
-            #            tau = t + delta_t
-            z = cvx.Variable(*w.shape)
-            wplus = w + z
-
-            if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(
-                self.returns_index, BaseReturnsModel
-            ):
-                diff = cvx.norm(
-                    self.returns_index.weight_expr(t)
-                    - self.return_forecast.weight_expr_ahead(t, tau, wplus),
-                    2,
-                )
-                # tracking_term = cvx.huber(diff, 0.1)
-                tracking_term = diff
-            else:
-                # TODO: Properly implement this if I want
-                # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
-                # tracking_term = cvx.sum(cvx.multiply(
-                #     values_in_time(self.return_forecast, t).values,
-                #     wplus))
-                logging.warning(
-                    "Not implemented see TrackingSinglePeriodOpt.get_trades()"
-                )
-
-            assert tracking_term.is_convex()
-
-            costs, constraints = [], []
-
-            for cost in self.costs:
-                cost_expr, const_expr = cost.weight_expr_ahead(t, tau, wplus, z, value)
-                costs.append(cost_expr)
-                constraints += const_expr
-
-            for item in (
-                con.weight_expr(t, wplus, z, value) for con in self.constraints
-            ):
-                if isinstance(item, list):
-                    constraints += item
-                else:
-                    constraints += [item]
-
-            for el in costs:
-                assert el.is_convex()
-
-            for el in constraints:
-                assert el.is_dcp()
-
-            obj = cvx.Minimize(tracking_term + sum(costs))
-            prob = cvx.Problem(
-                obj,
-                [cvx.sum(z) == 0] + constraints,
-            )
-            prob_arr.append(prob)
-            z_vars.append(z)
-            w = wplus
-
-        # Terminal constraint.
-        if self.terminal_weights is not None:
-            prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
-
-        # We are summing all problems in order to obtain overall objective
-        self.prob = sum(prob_arr)
-        try:
-            self.prob.solve(solver=self.solver, **self.solver_opts)
-            if self.prob.status == "unbounded":
-                logging.error("The problem is unbounded. Defaulting to no trades")
-                return self._nulltrade(portfolio)
-
-            if self.prob.status == "infeasible":
-                logging.error("The problem is infeasible. Defaulting to no trades")
-                return self._nulltrade(portfolio)
-            return pd.Series(index=portfolio.index, data=(z_vars[0].value * value))
-        except (cvx.SolverError, TypeError) as e:
-            logging.error(e)
-            logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
-            return self._nulltrade(portfolio)

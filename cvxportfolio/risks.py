@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from .costs import BaseCost
+from .constraints import BaseConstraint
 from .utils import values_in_time
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ __all__ = [
     "RobustFactorModelSigma",
     "RobustSigma",
     "FactorModelSigma",
+    "FullSigmaTEConst",
+    "FullSigmaTECost",
 ]
 
 
@@ -88,6 +91,39 @@ class BaseRiskModel(BaseCost):
             return np.NaN
 
 
+class BaseRiskModelConst(BaseConstraint):
+    def __init__(self, **kwargs):
+        self.w_bench = kwargs.pop("w_bench", 0.0)
+        super(BaseRiskModelConst, self).__init__()
+        self.gamma_half_life = kwargs.pop("gamma_half_life", np.inf)
+
+    def weight_expr(self, t, w_plus, z, value):
+        self.expression = self._estimate(t, w_plus - self.w_bench, z, value)
+        return self.expression
+
+    @abstractmethod
+    def _estimate(self, t, w_plus, z, value):
+        pass
+
+    # def weight_expr_ahead(self, t, tau, w_plus, z, value):
+    #     """Estimate risk model at time tau in the future."""
+    #     if self.gamma_half_life == np.inf:
+    #         gamma_multiplier = 1.0
+    #     else:
+    #         decay_factor = 2 ** (-1 / self.gamma_half_life)
+    #         # TODO not dependent on days
+    #         gamma_init = decay_factor ** ((tau - t).days)
+    #         gamma_multiplier = gamma_init * (1 - decay_factor) / (1 - decay_factor)
+
+    # return gamma_multiplier * self.weight_expr(t, w_plus, z, value)[0], []
+
+    def optimization_log(self, t):
+        if self.expression.value:
+            return self.expression.value
+        else:
+            return np.NaN
+
+
 class FullSigma(BaseRiskModel):
     """Quadratic risk model with full covariance matrix.
 
@@ -111,6 +147,117 @@ class FullSigma(BaseRiskModel):
         except TypeError:
             self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t).values)
         return self.expression
+
+
+class FullSigmaTEConst(BaseRiskModelConst):
+    """Quadratic risk model with full covariance matrix.
+
+    Args:
+        Sigma (:obj:`pd.Panel`): Panel of Sigma matrices,
+            or single matrix.
+
+    """
+
+    def __init__(self, Sigma, float_shares, index_prices, limit=None, **kwargs):
+        self.Sigma = Sigma  # Sigma is either a matrix or a pd.Panel
+        self.float_shares = float_shares
+        self.index_prices = index_prices
+        self.limit = limit
+        try:
+            assert not pd.isnull(Sigma).values.any()
+        except AttributeError:
+            assert not pd.isnull(Sigma).any()
+        super(FullSigmaTEConst, self).__init__(**kwargs)
+
+    def weight_expr(self, t, w_plus, z, value):
+        self.w_bench = self._get_index_weights(t)
+        self.expression = self._estimate(t, w_plus - self.w_bench, z, value)
+        return [self.expression <= self.limit]
+
+    # def weight_expr_ahead(self, t, tau, w_plus, z, value):
+    #     """Estimate risk model at time tau in the future."""
+    #     if self.gamma_half_life == np.inf:
+    #         gamma_multiplier = 1.0
+    #     else:
+    #         decay_factor = 2 ** (-1 / self.gamma_half_life)
+    #         # TODO not dependent on days
+    #         gamma_init = decay_factor ** ((tau - t).days)
+    #         gamma_multiplier = gamma_init * (1 - decay_factor) / (1 - decay_factor)
+    #     expr = self.weight_expr(t, w_plus, z, value)
+    #     return gamma_multiplier * expr[0], expr[1]
+
+    def _estimate(self, t, wplus, z, value):
+        try:
+            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t))
+        except TypeError:
+            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t).values)
+        return self.expression
+
+    def _get_index_weights(self, t):
+        market_cap = (
+            self.float_shares["float_shares"]
+            .multiply(values_in_time(self.index_prices, t))
+            .fillna(0)
+        )
+        index_weights = market_cap / market_cap.sum()
+        index_weights["Cash"] = 0
+        return index_weights
+
+
+class FullSigmaTECost(BaseRiskModel):
+    """Quadratic risk model with full covariance matrix.
+
+    Args:
+        Sigma (:obj:`pd.Panel`): Panel of Sigma matrices,
+            or single matrix.
+
+    """
+
+    def __init__(self, Sigma, float_shares, index_prices, limit=None, **kwargs):
+        self.Sigma = Sigma  # Sigma is either a matrix or a pd.Panel
+        self.float_shares = float_shares
+        self.index_prices = index_prices
+        self.limit = limit
+        try:
+            assert not pd.isnull(Sigma).values.any()
+        except AttributeError:
+            assert not pd.isnull(Sigma).any()
+        super(FullSigmaTECost, self).__init__(**kwargs)
+
+    def weight_expr(self, t, w_plus, z, value):
+        self.w_bench = self._get_index_weights(t)
+        self.expression = self._estimate(t, w_plus - self.w_bench, z, value)
+        return self.gamma * self.expression, []
+
+    def weight_expr_ahead(self, t, tau, w_plus, z, value):
+        """Estimate risk model at time tau in the future."""
+        if self.gamma_half_life == np.inf:
+            gamma_multiplier = 1.0
+        else:
+            decay_factor = 2 ** (-1 / self.gamma_half_life)
+            # TODO not dependent on days
+            gamma_init = decay_factor ** ((tau - t).days)
+            gamma_multiplier = gamma_init * (1 - decay_factor) / (1 - decay_factor)
+
+        # using tau here instead of t as I think this will impact control optimization
+        return gamma_multiplier * self.weight_expr(t, w_plus, z, value)[0], []
+
+    def _estimate(self, t, wplus, z, value):
+        try:
+            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t))
+        except TypeError:
+            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t).values)
+        return self.expression
+
+    def _get_index_weights(self, t):
+        market_cap = (
+            self.float_shares["float_shares"]
+            .multiply(values_in_time(self.index_prices, t))
+            .fillna(0)
+        )
+        index_weights = market_cap / market_cap.sum()
+        index_weights["Cash"] = 0
+        return index_weights
 
 
 class EmpSigma(BaseRiskModel):
@@ -169,16 +316,17 @@ class FactorModelSigma(BaseRiskModel):
 class RobustSigma(BaseRiskModel):
     """Implements covariance forecast error risk."""
 
-    def __init__(self, Sigma, epsilon, **kwargs):
+    def __init__(self, Sigma, gamma_risk, epsilon, **kwargs):
         self.Sigma = Sigma  # pd.Panel or matrix
         self.epsilon = epsilon  # pd.Series or scalar
+        self.gamma_risk = gamma_risk
         super(RobustSigma, self).__init__(**kwargs)
 
     def _estimate(self, t, wplus, z, value):
         self.expression = (
-            cvx.quad_form(wplus, values_in_time(self.Sigma, t))
+            self.gamma_risk * cvx.quad_form(wplus, values_in_time(self.Sigma, t))
             + values_in_time(self.epsilon, t)
-            * (cvx.abs(wplus).T * np.diag(values_in_time(self.Sigma, t))) ** 2
+            * (cvx.abs(wplus).T @ np.diag(values_in_time(self.Sigma, t))) ** 2
         )
 
         return self.expression

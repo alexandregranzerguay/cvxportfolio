@@ -16,7 +16,10 @@ limitations under the License.
 
 
 import cvxpy as cvx
-from cvxportfolio.expression import Expression
+import pandas as pd
+import numpy as np
+import functools
+from .expression import Expression
 from .utils import values_in_time, null_checker
 
 __all__ = [
@@ -86,30 +89,78 @@ class ReturnsForecast(BaseReturnsModel):
         return alpha
 
 
-class MPOReturnsForecast(BaseReturnsModel):
+class BlackLittermanModel:
+    def __init__(self, covariance_matrix=None, rf_rate=None):
+        self.covariance_matrix = covariance_matrix
+        self.rf_rate = rf_rate
+
+    # Calculates portfolio mean return
+    def port_mean(self, W, R):
+        return np.sum(R * W)
+
+    # Calculates portfolio variance of returns
+    def port_var(self, W, C):
+        return np.dot(np.dot(W, C), W)
+
+    # Combination of the two functions above - mean and variance of returns calculation
+    def port_mean_var(self, W, R, C):
+        return self.port_mean(W, R), self.port_var(W, C)
+
+    def get_BL(self, returns, weights, t):
+        """
+        use historical returns, covariances and float shares weights to get
+        excess returns (flaot share adjusted returns).
+        NOTE: This is for each period
+
+        NOTE: investor view are not implemented
+
+        Returns:
+
+        - excess returns
+        """
+        # index = returns.name
+        cov = values_in_time(self.covariance_matrix, t)
+
+        # Calculate portfolio historical return and variance
+        mean, var = self.port_mean_var(weights, returns, cov)
+
+        lmb = (mean - self.rf_rate) / var  # Calculate risk aversion
+        Pi = np.dot(np.dot(lmb, cov), weights)  # Calculate equilibrium excess returns
+        # excess_ret = Pi + rf #TODO: Check that this isn't double counting
+        excess_ret = Pi
+        # print(type(excess_ret))
+        return excess_ret
+
+
+class MPOReturnsForecast(BaseReturnsModel, BlackLittermanModel):
     """A single alpha estimation.
 
     Attributes:
       alpha_data: A dict of series of return estimates.
     """
 
-    def __init__(self, alpha_data):
+    def __init__(self, alpha_data, **kwargs):
         self.alpha_data = alpha_data
+        super(MPOReturnsForecast, self).__init__(**kwargs)
 
-    def weight_expr_ahead(self, t, tau, wplus):
+    def weight_expr_ahead(self, t, tau, wplus, w_index=None):
         """Returns the estimate at time t of alpha at time tau.
 
         Args:
-          t: time estimate is made.
-          wplus: An expression for holdings.
-          tau: time of alpha being estimated.
+            t: time estimate is made.
+            wplus: An expression for holdings.
+            tau: time of alpha being estimated.
 
         Returns:
-          An expression for the alpha.
+            An expression for the alpha.
         """
-        temp = self.alpha_data[(t, tau)].values.T
-        return self.alpha_data[(t, tau)].values.T @ wplus
-
+        if self.covariance_matrix is not None:
+            alpha = self.get_BL(self.alpha_data[(t, tau)], w_index, t)
+            return alpha @ (wplus - w_index)
+        if w_index is None:
+            return self.alpha_data[(t, tau)].values.T @ wplus
+        else:
+            return self.alpha_data[(t, tau)].values.T @ (wplus - w_index)
 
 class MultipleReturnsForecasts(BaseReturnsModel):
     """A weighted combination of alpha sources.
@@ -154,27 +205,3 @@ class MultipleReturnsForecasts(BaseReturnsModel):
         for idx, source in enumerate(self.alpha_sources):
             alpha += source.weight_expr_ahead(t, tau, wplus) * self.weights[idx]
         return alpha
-
-
-class MPOIndexReturnsForecast(BaseReturnsModel):
-    """A single alpha estimation.
-
-    Attributes:
-      alpha_data: A dict of series of return estimates.
-    """
-
-    def __init__(self, alpha_data):
-        self.alpha_data = alpha_data
-
-    def weight_expr_ahead(self, t, tau):
-        """Returns the estimate at time t of alpha at time tau.
-
-        Args:
-          t: time estimate is made.
-          wplus: An expression for holdings.
-          tau: time of alpha being estimated.
-
-        Returns:
-          An expression for the alpha.
-        """
-        return self.alpha_data[(t, tau)]
