@@ -752,7 +752,7 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(portfolio)
 
-            for con in self.constraints:
+            for con in prob_arr[0].constraints:
                 if isinstance(con, TrackingErrorMax):
                     self.te = con.expression.value
 
