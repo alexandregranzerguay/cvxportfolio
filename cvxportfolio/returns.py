@@ -26,7 +26,6 @@ __all__ = [
     "ReturnsForecast",
     "MPOReturnsForecast",
     "MultipleReturnsForecasts",
-    "MPOIndexReturnsForecast",
 ]
 
 
@@ -161,6 +160,7 @@ class MPOReturnsForecast(BaseReturnsModel, BlackLittermanModel):
             return self.alpha_data[(t, tau)].values.T @ wplus
         else:
             return self.alpha_data[(t, tau)].values.T @ (wplus - w_index)
+
 
 class MultipleReturnsForecasts(BaseReturnsModel):
     """A weighted combination of alpha sources.

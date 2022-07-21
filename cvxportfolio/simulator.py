@@ -122,8 +122,6 @@ class MarketSimulator:
             # # Used for debugging
             # if t == datetime.strptime("2020-06-25", "%Y-%m-%d"):
             #     print("check time")
-            if t != rebalance_on[-1]:
-                continue
             if t in rebalance_on:
                 logging.info("Getting trades at time %s" % t)
                 start = time.time()
@@ -177,9 +175,7 @@ class MarketSimulator:
         """Backtest multiple policies."""
 
         def _run_backtest(policy):
-            return self.run_backtest(
-                initial_portf, start_time, end_time, policy, loglevel=loglevel, rebalance_on=rebalance_on
-            )
+            return self.run_backtest(initial_portf, start_time, end_time, policy, rebalance_on=rebalance_on)
 
         num_workers = min(multiprocess.cpu_count(), len(policies))
         if parallel:
