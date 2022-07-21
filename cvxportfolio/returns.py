@@ -108,7 +108,7 @@ class BlackLittermanModel:
     def get_BL(self, returns, weights, t):
         """
         use historical returns, covariances and float shares weights to get
-        excess returns (flaot share adjusted returns).
+        excess returns (float share adjusted returns).
         NOTE: This is for each period
 
         NOTE: investor view are not implemented

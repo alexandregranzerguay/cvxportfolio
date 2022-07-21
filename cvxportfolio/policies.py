@@ -752,9 +752,9 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(portfolio)
 
-            for con in prob_arr[0].constraints:
-                if isinstance(con, TrackingErrorMax):
-                    self.te = con.expression.value
+            # for con in prob_arr[0].constraints:
+            #     if con.id == self.te_const_id:
+            self.te = 0
 
             return pd.Series(index=portfolio.index, data=(z_vars[0].value * value))
         except (cvx.SolverError, TypeError) as e:
