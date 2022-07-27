@@ -28,7 +28,7 @@ import sys
 
 from .costs import BaseCost
 from .returns import BaseReturnsModel
-from .constraints import BaseConstraint, TrackingErrorMax
+from .constraints import BaseConstraint, TrackingErrorMax, IndexUpdater
 from .utils import values_in_time, null_checker
 
 
@@ -649,6 +649,10 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
 
         prob_arr = []
         z_vars = []
+
+        # for con in self.constraints:
+        #     if isinstance(con, IndexUpdater) and hasattr(con, "is_initiated"):
+        #         con._update_required(t)
 
         # planning_periods = self.lookahead_model.get_periods(t)
         for tau in self.trading_times[

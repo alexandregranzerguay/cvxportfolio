@@ -88,10 +88,11 @@ class ReturnsForecast(BaseReturnsModel):
         return alpha
 
 
-class BlackLittermanModel:
-    def __init__(self, covariance_matrix=None, rf_rate=None):
+class BlackLittermanModel(BaseReturnsModel):
+    def __init__(self, covariance_matrix=None, rf_rate=None, **kwargs):
         self.covariance_matrix = covariance_matrix
         self.rf_rate = rf_rate
+        super().__init__(**kwargs)
 
     # Calculates portfolio mean return
     def port_mean(self, W, R):
@@ -131,7 +132,7 @@ class BlackLittermanModel:
         return excess_ret
 
 
-class MPOReturnsForecast(BaseReturnsModel, BlackLittermanModel):
+class MPOReturnsForecast(BlackLittermanModel):
     """A single alpha estimation.
 
     Attributes:
@@ -140,7 +141,7 @@ class MPOReturnsForecast(BaseReturnsModel, BlackLittermanModel):
 
     def __init__(self, alpha_data, **kwargs):
         self.alpha_data = alpha_data
-        super(MPOReturnsForecast, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def weight_expr_ahead(self, t, tau, wplus, w_index=None):
         """Returns the estimate at time t of alpha at time tau.

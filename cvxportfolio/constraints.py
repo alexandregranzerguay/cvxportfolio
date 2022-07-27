@@ -81,10 +81,7 @@ class MaxTrade(BaseConstraint):
           z: trade weights
           v: portfolio value
         """
-        return (
-            cvx.abs(z[:-1]) * v
-            <= np.array(values_in_time(self.ADVs, t)) * self.max_fraction
-        )
+        return cvx.abs(z[:-1]) * v <= np.array(values_in_time(self.ADVs, t)) * self.max_fraction
 
 
 class LongOnly(BaseConstraint):
@@ -219,9 +216,7 @@ class FactorMaxLimit(BaseConstraint):
             t: time
             w_plus: holdings
         """
-        return values_in_time(self.factor_exposure, t).T @ w_plus[
-            :-1
-        ] <= values_in_time(self.limit, t)
+        return values_in_time(self.factor_exposure, t).T @ w_plus[:-1] <= values_in_time(self.limit, t)
 
 
 class FactorMinLimit(BaseConstraint):
@@ -245,9 +240,7 @@ class FactorMinLimit(BaseConstraint):
             t: time
             w_plus: holdings
         """
-        return values_in_time(self.factor_exposure, t).T @ w_plus[
-            :-1
-        ] >= values_in_time(self.limit, t)
+        return values_in_time(self.factor_exposure, t).T @ w_plus[:-1] >= values_in_time(self.limit, t)
 
 
 class FixedAlpha(BaseConstraint):
@@ -265,9 +258,7 @@ class FixedAlpha(BaseConstraint):
         self.alpha_target = alpha_target
 
     def _weight_expr(self, t, w_plus, z, v):
-        return values_in_time(self.return_forecast, t).T @ w_plus[
-            :-1
-        ] == values_in_time(self.alpha_target, t)
+        return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == values_in_time(self.alpha_target, t)
 
 
 # TODO: Determine if it's better to implement these classes here or simply import baseconstraint class
@@ -289,24 +280,85 @@ class Cardinality(BaseConstraint):
         return constr
 
 
-class TrackingErrorMax(BaseConstraint):
-    """A constraint to impose tracking error
-
-    Attributes:
-        sigma : covariance matrix
-        w_index: tracked index weights
+class IndexUpdater:
+    """This class is not complete and does not work, the only part of it that works is the _get_index_weights function, where it returns index weights
+    based off of a single vector of float shares. Essentially I assume that this vector would be properly updated IRL but that until I can find historical
+    values of float shares, it makes no sense to try and estimate this...
     """
 
-    def __init__(self, Sigma, float_shares, index_prices, limit, **kwargs):
+    def __init__(self, **kwargs):
+        # Could potentially add a checker that makes sure that self has all the element this class will need outside of init updater function
+        pass
+
+    def _init_updater(self, index_ref, index_prices, budget, sigma):
+        self.start_dt = sigma.index[0]
+        self.market_returns = index_prices.pct_change().dropna()
+        self.index_returns = index_ref.pct_change().dropna()
+        self.update_freq = "q"
+        self.current_quarter = index_prices.index[0].quarter
+        self.current_year = index_prices.index[0].year
+        self.budget = budget
+        self.is_initiated = True
+
+    def _update_required(self, t):
+        # Update float_shares quarterly
+        if self.update_freq == "q":
+            if t.quarter != self.current_quarter or t.year != self.current_year:
+                self.current_quarter = t.quarter
+                self.current_year = t.year
+                self._update_index_float_shares(t)
+
+    def _update_index_float_shares(self, t):
+        delta = cvx.Variable(shape=self.float_shares["float_shares"].shape)
+        shares = cvx.Constant(self.float_shares["float_shares"].fillna(0))
+        shares_plus = shares + delta
+
+        w_index_plus = self._get_index_weights(t, shares=shares_plus)
+        est_index_ret = w_index_plus @ self.market_returns.loc[self.start_dt : t].T
+        est_index_val = (self.budget * (1 + est_index_ret).cumprod())[-1]
+
+        est_index_val
+        # # get individual sotck market cap
+        # market_cap = cvx.multiply(shares_plus, values_in_time(self.index_prices, t))
+
+        # # weight by market cap
+        # weights = market_cap / cvx.sum(market_cap)
+
+        # # Index value
+        # index_val = weights @ values_in_time(self.index_prices, t)
+
+        obj = cvx.norm(est_index_val, values_in_time(self.index_ref, t))
+        constraints = [shares_plus >= 0]
+        prob = cvx.Problem(obj, constraints)
+        prob.solve(solver=cvx.CVXOPT)
+
+        self.float_shares["float_shares"] = shares_plus.value
+
+    def _get_index_weights(self, t, shares=None):
+        # if shares is None:
+        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
+        index_weights = market_cap / market_cap.sum()
+        index_weights["Cash"] = 0
+        # else:
+        #     market_cap = cvx.multiply(shares, values_in_time(self.index_prices, t))
+        #     index_weights = market_cap / cvx.sum(market_cap)
+        return index_weights
+
+
+class TrackingErrorMax(IndexUpdater, BaseConstraint):
+    def __init__(self, Sigma, limit, float_shares, index_prices, use_updater=False, **kwargs):
         self.Sigma = Sigma  # Sigma is either a matrix or a pd.Panel
+        self.limit = limit
         self.float_shares = float_shares
         self.index_prices = index_prices
-        self.limit = limit
         try:
             assert not pd.isnull(Sigma).values.any()
         except AttributeError:
             assert not pd.isnull(Sigma).any()
-        super(TrackingErrorMax, self).__init__(**kwargs)
+        super().__init__(**kwargs)
+
+        # if use_updater:
+        #     self._init_updater(index_prices=index_prices, sigma=Sigma, **kwargs)
 
     def weight_expr(self, t, w_plus, z, value):
         self.w_bench = self._get_index_weights(t)
@@ -319,13 +371,3 @@ class TrackingErrorMax(BaseConstraint):
         except TypeError:
             self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t).values)
         return self.expression
-
-    def _get_index_weights(self, t):
-        market_cap = (
-            self.float_shares["float_shares"]
-            .multiply(values_in_time(self.index_prices, t))
-            .fillna(0)
-        )
-        index_weights = market_cap / market_cap.sum()
-        index_weights["Cash"] = 0
-        return index_weights

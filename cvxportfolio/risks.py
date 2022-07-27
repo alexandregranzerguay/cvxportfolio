@@ -194,11 +194,7 @@ class FullSigmaTEConst(BaseRiskModelConst):
         return self.expression
 
     def _get_index_weights(self, t):
-        market_cap = (
-            self.float_shares["float_shares"]
-            .multiply(values_in_time(self.index_prices, t))
-            .fillna(0)
-        )
+        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
         index_weights = market_cap / market_cap.sum()
         index_weights["Cash"] = 0
         return index_weights
@@ -250,11 +246,7 @@ class FullSigmaTECost(BaseRiskModel):
         return self.expression
 
     def _get_index_weights(self, t):
-        market_cap = (
-            self.float_shares["float_shares"]
-            .multiply(values_in_time(self.index_prices, t))
-            .fillna(0)
-        )
+        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
         index_weights = market_cap / market_cap.sum()
         index_weights["Cash"] = 0
         return index_weights
@@ -325,8 +317,7 @@ class RobustSigma(BaseRiskModel):
     def _estimate(self, t, wplus, z, value):
         self.expression = (
             self.gamma_risk * cvx.quad_form(wplus, values_in_time(self.Sigma, t))
-            + values_in_time(self.epsilon, t)
-            * (cvx.abs(wplus).T @ np.diag(values_in_time(self.Sigma, t))) ** 2
+            + values_in_time(self.epsilon, t) * (cvx.abs(wplus).T @ np.diag(values_in_time(self.Sigma, t))) ** 2
         )
 
         return self.expression
