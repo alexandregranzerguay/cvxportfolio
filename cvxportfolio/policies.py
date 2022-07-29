@@ -768,14 +768,6 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
 
 
 class CardTrackingSinglePeriodOpt(BasePolicy):
-    """Single-period optimization policy - WIP.
-
-    This is my final optimizatin portfolio class used for TDF idea.
-
-    Implements the model developed in chapter 4 of our paper
-    https://stanford.edu/~boyd/papers/cvx_portfolio.html
-    """
-
     def __init__(
         self,
         return_forecast,
@@ -1048,23 +1040,10 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
         h_ndim = w.size
         return np.max(
             np.abs(
-                np.array(
-                    [
-                        (
-                            self.F(w, z, y, u, portf_value, t)[0].value
-                            - self.F(
-                                w - h * self._basis_vec(h_ndim, i),
-                                z,
-                                y,
-                                u,
-                                portf_value,
-                                t,
-                            )[0].value
-                        )
-                        / h
-                        for i in range(h_ndim)
-                    ]
-                )
+                np.array([
+                    (self.F(w, z, y, u, portf_value, t)[0].value - self.F(w - h * self._basis_vec(h_ndim, i),z, y,u,portf_value,t)[0].value)/h
+                    for i in range(h_ndim)
+                ])
             )
         )
 

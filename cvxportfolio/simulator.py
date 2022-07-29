@@ -136,6 +136,8 @@ class MarketSimulator:
                     logging.warning("Solver failed on timestamp %s. Default to no trades." % t)
                     print(e)
                     u = pd.Series(index=h.index, data=0.0)
+                end = time.time()
+                results.log_policy(t, end - start)
             else:
                 logging.info(f"{t} is not a rebalancing date")
                 u = pd.Series(index=h.index, data=0.0)
@@ -143,10 +145,8 @@ class MarketSimulator:
             # diffs[t] = diff.value
             # print(self.cash_key in u.index)
             # print(self.cash_key in h.index)
-            end = time.time()
-            assert not pd.isnull(u).any()
-            results.log_policy(t, end - start)
 
+            assert not pd.isnull(u).any()
             logging.info("Propagating portfolio at time %s" % t)
             start = time.time()
             h, u = self.propagate(h, u, t)
@@ -170,7 +170,14 @@ class MarketSimulator:
         return results
 
     def run_multiple_backtest(
-        self, initial_portf, start_time, end_time, policies, loglevel=logging.WARNING, parallel=True, rebalance_on=None
+        self,
+        initial_portf,
+        start_time,
+        end_time,
+        policies,
+        loglevel=logging.WARNING,
+        parallel=False,
+        rebalance_on=None,
     ):
         """Backtest multiple policies."""
 
@@ -179,6 +186,7 @@ class MarketSimulator:
 
         num_workers = min(multiprocess.cpu_count(), len(policies))
         if parallel:
+            # Note: multiprocess will not work with Gurobi (and maybe other optimizers) due to pickling of objects that can't be serialized.
             workers = multiprocess.Pool(num_workers)
             results = workers.map(_run_backtest, policies)
             workers.close()

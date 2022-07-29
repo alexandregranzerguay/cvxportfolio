@@ -261,23 +261,22 @@ class FixedAlpha(BaseConstraint):
         return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == values_in_time(self.alpha_target, t)
 
 
-# TODO: Determine if it's better to implement these classes here or simply import baseconstraint class
-# and implement in notebook
 class Cardinality(BaseConstraint):
-    """A constraint to impose cardinality constraint on portfolio
-    TODO: Implement this
-    """
+    """A constraint to impose cardinality constraint on portfolio, this introduces MIP complexity"""
 
     def __init__(self, limit, **kwargs):
         super(Cardinality, self).__init__(**kwargs)
         self.limit = limit
 
     def _weight_expr(self, t, w_plus, z, v):
-        t = cvx.Variable(w_plus[:-1].shape[0], boolean=True)
+        y = cvx.Variable(w_plus[:-1].shape[0], boolean=True)
         constr = []
-        constr += [sum(t) == self.limit]
-        constr += [w_plus[:-1] - t <= 0]
+        constr += [sum(y) <= self.limit]
+        for i in range(w_plus[:-1].shape[0]):
+            constr += [w_plus[i] <= 1 * y[i]]
         return constr
+
+        # return cvx.norm(w_plus[:-1], "nuc") <= self.limit
 
 
 class IndexUpdater:
