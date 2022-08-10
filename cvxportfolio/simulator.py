@@ -19,10 +19,13 @@ from datetime import datetime
 import logging
 import time
 
+# from pathos import multiprocessing
 import multiprocess
 import numpy as np
 import pandas as pd
 import cvxpy as cvx
+
+from tqdm import tqdm
 
 from .returns import MultipleReturnsForecasts
 
@@ -92,7 +95,7 @@ class MarketSimulator:
         assert not u.isnull().values.all()
         return h_next, u
 
-    def run_backtest(self, initial_portfolio, start_time, end_time, policy, rebalance_on=None):
+    def run_backtest(self, initial_portfolio, start_time, end_time, policy, rebalance_on=None, tqdm_pos=0):
         """Backtest a single policy.
 
         rebalance_on: Dataframe of dates to execute trades on
@@ -118,7 +121,8 @@ class MarketSimulator:
         if rebalance_on is None:
             rebalance_on = simulation_times
         # diffs = {}
-        for t in simulation_times:
+        for t in tqdm(simulation_times, position=tqdm_pos):
+            # for t in simulation_times:
             # # Used for debugging
             # if t == datetime.strptime("2020-06-25", "%Y-%m-%d"):
             #     print("check time")
@@ -128,7 +132,6 @@ class MarketSimulator:
                 try:
                     # u, diff = policy.get_trades(h, t)
                     u = policy.get_trades(h, t)
-                    results.log_data("te", t, policy.te)
                     # results.log_data("diff_obj", t, policy.diff_obj.value)
                     # results.log_data("index_obj", t, policy.index_obj)
                     # results.log_data("portfolio_obj", t, policy.portfolio_obj.value)
@@ -162,6 +165,10 @@ class MarketSimulator:
             )
 
             # Reporting
+            try:
+                results.log_data("te", t, policy.te)
+            except:
+                results.log_data("te", t, 0)
             results.log_data("w_index", t, policy.w_index)
             results.log_data("market_returns", t, self.market_returns.loc[t])
         # pd_diff = pd.DataFrame(diffs)
@@ -181,14 +188,22 @@ class MarketSimulator:
     ):
         """Backtest multiple policies."""
 
-        def _run_backtest(policy):
-            return self.run_backtest(initial_portf, start_time, end_time, policy, rebalance_on=rebalance_on)
+        def _run_backtest(policy, tqdm_pos=0):
+            return self.run_backtest(
+                initial_portf, start_time, end_time, policy, rebalance_on=rebalance_on, tqdm_pos=tqdm_pos
+            )
 
         num_workers = min(multiprocess.cpu_count(), len(policies))
         if parallel:
             # Note: multiprocess will not work with Gurobi (and maybe other optimizers) due to pickling of objects that can't be serialized.
             workers = multiprocess.Pool(num_workers)
-            results = workers.map(_run_backtest, policies)
+            # results = workers.map(_run_backtest, policies)
+            worker_iter = [[policies[i], i] for i in range(num_workers)]
+            results = workers.starmap(_run_backtest, worker_iter)
+            # results = tqdm(
+            #     workers.imap_unordered(_run_backtest, policies),
+            #     total=num_workers,
+            # )
             workers.close()
             return results
         else:

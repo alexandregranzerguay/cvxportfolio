@@ -540,11 +540,12 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
             t = dt.datetime.today()
 
         value = sum(portfolio)
-        w = portfolio / value
+        assert value > 0.0
+        w = cvx.Constant(portfolio.values / value)
         z = cvx.Variable(w.size)  # TODO pass index
-        wplus = w.values + z
+        wplus = w + z
         w_index = self._get_index_weights(t)
-        w_index["Cash"] = 0
+        self.w_index = w_index
 
         if isinstance(self.return_forecast, BaseReturnsModel):
             # diff = cvx.norm(
@@ -554,7 +555,7 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
             # )
             # tracking_term = cvx.huber(diff, 0.1)
             # tracking_term = diff
-            ret = self.gamma_excess * self.return_forecast.weight_expr(t, (wplus - w_index))
+            ret = self.gamma_excess * self.return_forecast.weight_expr(t, wplus=wplus, w_index=w_index)
         else:
             # TODO: Properly implement this if I want
             # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
@@ -724,10 +725,7 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
 
             # obj = cvx.Minimize(tracking_term + sum(costs))
             obj = cvx.Minimize(-ret + sum(costs))
-            prob = cvx.Problem(
-                obj,
-                [cvx.sum(z) == 0] + constraints,
-            )
+            prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
             prob_arr.append(prob)
             z_vars.append(z)
             w = wplus
@@ -758,7 +756,6 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
 
             # for con in prob_arr[0].constraints:
             #     if con.id == self.te_const_id:
-            self.te = 0
 
             return pd.Series(index=portfolio.index, data=(z_vars[0].value * value))
         except (cvx.SolverError, TypeError) as e:
@@ -1040,10 +1037,16 @@ class CardTrackingSinglePeriodOpt(BasePolicy):
         h_ndim = w.size
         return np.max(
             np.abs(
-                np.array([
-                    (self.F(w, z, y, u, portf_value, t)[0].value - self.F(w - h * self._basis_vec(h_ndim, i),z, y,u,portf_value,t)[0].value)/h
-                    for i in range(h_ndim)
-                ])
+                np.array(
+                    [
+                        (
+                            self.F(w, z, y, u, portf_value, t)[0].value
+                            - self.F(w - h * self._basis_vec(h_ndim, i), z, y, u, portf_value, t)[0].value
+                        )
+                        / h
+                        for i in range(h_ndim)
+                    ]
+                )
             )
         )
 

@@ -67,10 +67,14 @@ class SimulationResult:
         self.simulator = simulator
         self.policy = policy
 
-    def summary(self):
+    def summary(self, as_pd=False):
+        if as_pd:
+            df = self._summary_string(as_pd)
+            print(df.to_string(float_format="{:,.3f}".format))
+            return df
         print(self._summary_string())
 
-    def _summary_string(self):
+    def _summary_string(self, as_pd=False):
         data = collections.OrderedDict(
             {
                 "Number of periods": self.u.shape[0],
@@ -87,7 +91,8 @@ class SimulationResult:
                 "Total cost of trading": self.total_trade_cost.sum(),
             }
         )
-
+        if as_pd:
+            return pd.Series(data)
         return pd.Series(data=data).to_string(float_format="{:,.3f}".format)
 
     def log_data(self, name, t, entry):

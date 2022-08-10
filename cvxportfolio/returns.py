@@ -33,61 +33,6 @@ class BaseReturnsModel(Expression):
     pass
 
 
-class ReturnsForecast(BaseReturnsModel):
-    """A single return forecast.
-
-    Attributes:
-      alpha_data: A dataframe of return estimates.
-      delta_data: A confidence interval around the estimates.
-      half_life: Number of days for alpha auto-correlation to halve.
-    """
-
-    def __init__(self, returns, delta=0.0, gamma_decay=None, name=None):
-        null_checker(returns)
-        self.returns = returns
-        null_checker(delta)
-        self.delta = delta
-        self.gamma_decay = gamma_decay
-        self.name = name
-
-    def weight_expr(self, t, wplus=None, z=None, v=None):
-        """Returns the estimated alpha.
-
-        Args:
-          t: time estimate is made.
-          wplus: An expression for holdings.
-          tau: time of alpha being estimated.
-
-        Returns:
-          An expression for the alpha.
-        """
-        if wplus is None:
-            alpha = values_in_time(self.returns, t)
-            # assert (isinstance(alpha, float))
-            return alpha
-        else:
-            alpha = cvx.multiply(values_in_time(self.returns, t), wplus)
-            alpha -= cvx.multiply(values_in_time(self.delta, t), cvx.abs(wplus))
-            return cvx.sum(alpha)
-
-    def weight_expr_ahead(self, t, tau, wplus=None):
-        """Returns the estimate at time t of alpha at time tau.
-
-        Args:
-          t: time estimate is made.
-          wplus: An expression for holdings.
-          tau: time of alpha being estimated.
-
-        Returns:
-          An expression for the alpha.
-        """
-
-        alpha = self.weight_expr(t, wplus)
-        if tau > t and self.gamma_decay is not None:
-            alpha *= (tau - t).days ** (-self.gamma_decay)
-        return alpha
-
-
 class BlackLittermanModel(BaseReturnsModel):
     def __init__(self, covariance_matrix=None, rf_rate=None, **kwargs):
         self.covariance_matrix = covariance_matrix
@@ -130,6 +75,65 @@ class BlackLittermanModel(BaseReturnsModel):
         excess_ret = Pi
         # print(type(excess_ret))
         return excess_ret
+
+
+class ReturnsForecast(BlackLittermanModel):
+    """A single return forecast.
+
+    Attributes:
+      alpha_data: A dataframe of return estimates.
+      delta_data: A confidence interval around the estimates.
+      half_life: Number of days for alpha auto-correlation to halve.
+    """
+
+    def __init__(self, returns, delta=0.0, gamma_decay=None, name=None, **kwargs):
+        null_checker(returns)
+        self.returns = returns
+        null_checker(delta)
+        self.delta = delta
+        self.gamma_decay = gamma_decay
+        self.name = name
+        super().__init__(**kwargs)
+
+    def weight_expr(self, t, wplus=None, z=None, v=None, w_index=None):
+        """Returns the estimated alpha.
+
+        Args:
+          t: time estimate is made.
+          wplus: An expression for holdings.
+          tau: time of alpha being estimated.
+
+        Returns:
+          An expression for the alpha.
+        """
+        if self.covariance_matrix is not None:
+            alpha = self.get_BL(values_in_time(self.returns, t), w_index, t)
+            return alpha @ (wplus - w_index)
+        elif wplus is None:
+            alpha = values_in_time(self.returns, t)
+            # assert (isinstance(alpha, float))
+            return alpha
+        else:
+            alpha = cvx.multiply(values_in_time(self.returns, t), wplus)
+            alpha -= cvx.multiply(values_in_time(self.delta, t), cvx.abs(wplus))
+            return cvx.sum(alpha)
+
+    def weight_expr_ahead(self, t, tau, wplus=None):
+        """Returns the estimate at time t of alpha at time tau.
+
+        Args:
+          t: time estimate is made.
+          wplus: An expression for holdings.
+          tau: time of alpha being estimated.
+
+        Returns:
+          An expression for the alpha.
+        """
+
+        alpha = self.weight_expr(t, wplus)
+        if tau > t and self.gamma_decay is not None:
+            alpha *= (tau - t).days ** (-self.gamma_decay)
+        return alpha
 
 
 class MPOReturnsForecast(BlackLittermanModel):
