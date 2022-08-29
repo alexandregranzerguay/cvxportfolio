@@ -43,8 +43,9 @@ __all__ = [
     "RankAndLongShort",
     "PosTrackingSinglePeriodOpt",
     "QuadTrackingSinglePeriodOpt",
-    "CardTrackingSinglePeriodOpt",
     "QuadTrackingMultiPeriodOpt",
+    "PADMCardTrackingSinglePeriodOpt",
+    "ADMCardTrackingSinglePeriodOpt",
 ]
 
 
@@ -764,7 +765,422 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
             return self._nulltrade(portfolio)
 
 
-class CardTrackingSinglePeriodOpt(BasePolicy):
+class PADMCardTrackingSinglePeriodOpt(BasePolicy):
+    """This is a crude implementation of PADM - see PADM-Cardinality Constrained Portfolio[73]"""
+
+    def __init__(
+        self,
+        return_forecast,
+        index_prices,
+        float_shares,
+        costs,
+        constraints,
+        gamma_excess,
+        card,
+        thresh=1e-4,
+        max_iter=10,
+        solver=None,
+        solver_opts=None,
+        index_value=None,
+        **kwargs,
+    ):
+
+        if not isinstance(return_forecast, BaseReturnsModel):
+            null_checker(return_forecast)
+        self.return_forecast = return_forecast
+        self.index_prices = index_prices
+        self.index_value = index_value
+        self.float_shares = float_shares
+        self.gamma_excess = gamma_excess
+        self.card = card
+        self.THRESH = thresh
+        self.MAX_ITER = max_iter
+
+        # Add any other keyword args to the class dict
+        self.__dict__.update(kwargs)
+
+        super().__init__()
+
+        for cost in costs:
+            assert isinstance(cost, BaseCost)
+            self.costs.append(cost)
+
+        for constraint in constraints:
+            assert isinstance(constraint, BaseConstraint)
+            self.constraints.append(constraint)
+
+        assert isinstance(self.return_forecast, BaseReturnsModel), "return forecast must be of type BaseReturnModel"
+
+        self.solver = solver
+        self.solver_opts = {} if solver_opts is None else solver_opts
+
+    def get_trades(self, portfolio, t=None):
+        """
+        Get optimal trade vector for given portfolio at time t.
+
+        Parameters
+        ----------
+        portfolio : pd.Series
+            Current portfolio vector.
+        t : pd.timestamp
+            Timestamp for the optimization.
+        """
+
+        if t is None:
+            t = dt.datetime.today()
+
+        self.portfolio = portfolio
+        self.value = sum(self.portfolio)
+        assert self.value > 0.0
+        self.w = cvx.Constant(self.portfolio.values / self.value)
+        self.w_index = self._get_index_weights(t)
+        mu = 1e-4
+        y_next = self.w
+        iteration = 0
+        while True:
+            w_next = self.f(y_next, mu, t)
+            y_next = self.g(w_next)
+            diff = np.linalg.norm((w_next - y_next), 1)
+            if diff < self.THRESH:
+                # might have to remove .value after w or y_next
+                z = y_next - self.w.value
+                # may need to add .value after z
+                return pd.Series(index=portfolio.index, data=(z * self.value))
+
+            if iteration >= self.MAX_ITER:
+                print("Max iter reached - not optimal!")
+                z = y_next - self.w.value
+                return pd.Series(index=portfolio.index, data=(z * self.value))
+
+            mu = mu * 10
+            iteration += 1
+
+    def f(self, y, mu, t):
+        z = cvx.Variable(self.w.size)
+        w_next = self.w + z
+
+        # Objective Function
+        ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
+
+        # l1 penalty term
+        ret += mu * cvx.norm(w_next - y, 1)
+
+        # assert tracking_term.is_convex()
+        assert ret.is_convex()
+
+        # Additional Costs & Constraints
+        costs, constraints = [], []
+
+        for cost in self.costs:
+            cost_expr, const_expr = cost.weight_expr(t, w_next, z, self.value)
+            costs.append(cost_expr)
+            constraints += const_expr
+
+        for item in (con.weight_expr(t, w_next, z, self.value) for con in self.constraints):
+            if isinstance(item, list):
+                constraints += item
+            else:
+                constraints += [item]
+
+        for el in costs:
+            assert el.is_convex()
+
+        for el in constraints:
+            assert el.is_dcp()
+
+        obj = cvx.Minimize(ret + sum(costs))
+        prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
+        try:
+            prob.solve(solver=self.solver, **self.solver_opts)
+            if prob.status == "unbounded":
+                logging.error("The problem is unbounded. Defaulting to no trades")
+                return self._nulltrade(self.portfolio)
+
+            if prob.status == "infeasible":
+                logging.error("The problem is infeasible. Defaulting to no trades")
+                return self._nulltrade(self.portfolio)
+            return w_next.value
+        except Exception as e:
+            print(e)
+            print("Error solving f() part of the problem")
+
+    # def g(self, w_next):
+    #     z = cvx.Variable(self.w.size)  # TODO pass index
+    #     y_next = self.w + z
+
+    #     obj = cvx.Minimize(cvx.norm(w_next - y_next, 1))
+
+    #     constraints = [cvx.sum(z) == 0]
+    #     y_bool = cvx.Variable(w_next[:-1].shape[0], boolean=True)
+    #     constraints += [sum(y_bool) <= self.card]
+    #     for i in range(y_next[:-1].shape[0]):
+    #         constraints += [y_next[i] <= 1 * y_bool[i]]
+
+    #     prob = cvx.Problem(obj, constraints)
+    #     try:
+    #         prob.solve(solver=self.solver, **self.solver_opts)
+    #         if prob.status == "unbounded":
+    #             logging.error("The problem is unbounded. Defaulting to no trades")
+    #             return self._nulltrade(self.portfolio)
+
+    #         if prob.status == "infeasible":
+    #             logging.error("The problem is infeasible. Defaulting to no trades")
+    #             return self._nulltrade(self.portfolio)
+    #         # Check that return is correct
+    #         return y_next, prob.value
+    #     except Exception as e:
+    #         print(e)
+    #         print("Error solving g() part of the problem")
+
+    def g(self, w_next):
+        i_s = np.argsort(w_next)[::-1][: self.card]
+        w_s = w_next[i_s]
+        return np.where(np.isin(w_next, w_s), w_next / np.sum(w_s), 0)
+
+    def _get_index_weights(self, t):
+        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
+        index_weights = market_cap / market_cap.sum()
+        index_weights["Cash"] = 0
+        return index_weights
+
+
+# class CardTrackingSinglePeriodOpt(BasePolicy):
+#     """This is a crude implementation of PADM - see PADM-Cardinality Constrained Portfolio[73]
+#     with closed form solution
+#     """
+
+
+class ADMCardTrackingSinglePeriodOpt(BasePolicy):
+    """This is the implementation of ADMM - see A Novel Approach for Solving Convex Problems with Cardinality Constraints,
+    prox_algs (boyd).
+    """
+
+    def __init__(
+        self,
+        return_forecast,
+        index_prices,
+        float_shares,
+        costs,
+        constraints,
+        gamma_excess,
+        card,
+        thresh=1e-6,
+        max_iter=10,
+        solver=None,
+        solver_opts=None,
+        index_value=None,
+        **kwargs,
+    ):
+
+        if not isinstance(return_forecast, BaseReturnsModel):
+            null_checker(return_forecast)
+        self.return_forecast = return_forecast
+        self.index_prices = index_prices
+        self.index_value = index_value
+        self.float_shares = float_shares
+        self.gamma_excess = gamma_excess
+        self.card = card
+        self.THRESH = thresh
+        self.MAX_ITER = max_iter
+
+        # Add any other keyword args to the class dict
+        self.__dict__.update(kwargs)
+
+        super().__init__()
+
+        for cost in costs:
+            assert isinstance(cost, BaseCost)
+            self.costs.append(cost)
+
+        for constraint in constraints:
+            assert isinstance(constraint, BaseConstraint)
+            self.constraints.append(constraint)
+
+        assert isinstance(self.return_forecast, BaseReturnsModel), "return forecast must be of type BaseReturnModel"
+
+        self.solver = solver
+        self.solver_opts = {} if solver_opts is None else solver_opts
+
+    def get_trades(self, portfolio, t=None):
+        """
+        Get optimal trade vector for given portfolio at time t.
+
+        Parameters
+        ----------
+        portfolio : pd.Series
+            Current portfolio vector.
+        t : pd.timestamp
+            Timestamp for the optimization.
+        """
+
+        if t is None:
+            t = dt.datetime.today()
+
+        self.portfolio = portfolio
+        self.value = sum(self.portfolio)
+        assert self.value > 0.0
+        self.w = cvx.Constant(self.portfolio.values / self.value)
+        self.w_index = self._get_index_weights(t)
+        mu = 1e-4
+        # Initialize y_next
+        y_next = self._rand_gen(self.w.size)
+        iteration = 0
+        u = 0
+        while True:
+            w_next = self.f(y_next - u, mu, t)
+            y_next = self.g(w_next + u)
+            temp_sum = y_next.sum()
+            temp_sum_w = w_next.sum()
+            # Check stopping criteria
+            if iteration == 0:
+                diff = np.linalg.norm((w_next - y_next), 1)
+            else:
+                diff_last = diff
+                diff = np.linalg.norm((w_next - y_next), 1)
+                temp = (diff_last - diff) ** 2
+                if (diff_last - diff) ** 2 < self.THRESH:
+                    z = y_next - self.w.value
+                    # may need to add .value after z
+                    return pd.Series(index=portfolio.index, data=(z * self.value))
+
+                if iteration >= self.MAX_ITER:
+                    print("Max iter reached - not optimal!")
+                    z = y_next - self.w.value
+                    return pd.Series(index=portfolio.index, data=(z * self.value))
+
+            # Update
+            # mu = mu * 10
+            u = u + w_next - y_next
+            iteration += 1
+
+    def f(self, y, mu, t):
+        z = cvx.Variable(self.w.size)
+        w_next = self.w + z
+
+        # Objective Function
+        ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
+
+        # l1 penalty term
+        # ret += mu * cvx.norm(w_next - y, 1)
+
+        # Proximality term 1/2||x-z||^2
+        gamma = 1  # TBD if I want to change this
+        ret += 1 / (2 * gamma) * cvx.square(cvx.norm(w_next - y, 2))
+
+        # assert tracking_term.is_convex()
+        assert ret.is_convex()
+
+        # Additional Costs & Constraints
+        costs, constraints = [], []
+
+        for cost in self.costs:
+            cost_expr, const_expr = cost.weight_expr(t, w_next, z, self.value)
+            costs.append(cost_expr)
+            constraints += const_expr
+
+        for item in (con.weight_expr(t, w_next, z, self.value) for con in self.constraints):
+            if isinstance(item, list):
+                constraints += item
+            else:
+                constraints += [item]
+
+        for el in costs:
+            assert el.is_convex()
+
+        for el in constraints:
+            assert el.is_dcp()
+
+        obj = cvx.Minimize(ret + sum(costs))
+        prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
+        try:
+            prob.solve(solver=self.solver, **self.solver_opts)
+            if prob.status == "unbounded":
+                logging.error("The problem is unbounded. Defaulting to no trades")
+                return self._nulltrade(self.portfolio)
+
+            if prob.status == "infeasible":
+                logging.error("The problem is infeasible. Defaulting to no trades")
+                return self._nulltrade(self.portfolio)
+            return w_next.value
+        except Exception as e:
+            print(e)
+            print("Error solving f() part of the problem")
+
+    def g(self, w_next):
+        """Proximal operator for I_B(x) + gamma * phi_k(x)
+        This function requires the calculation of the gradient TODO: Will implement at a later time to compare
+
+        phi_k(x) : ||x||_1 - ||x||_k, i.e., the difference between the sum of elements of x and the sum of the k largest elements
+        """
+        # Set all negative elements to 0.
+        # w_next = np.where(w_next <0, 0, w_next)
+        # Sorting incoming vector
+        i_s = np.argsort(w_next)[::-1]
+
+        kappa = 1  # Can change this later to be = max(gradient(f)) - see paper by gonjac
+
+        def _prox(val, idx):
+            for init_i, sorted_i in enumerate(idx):
+                if init_i > self.card:
+                    val[sorted_i] = self._saturation(self._soft_thresh(val[sorted_i], kappa), 0, 1)
+                else:
+                    val[sorted_i] = self._saturation(val[sorted_i], 0, 1)
+            return val
+
+        _prox(w_next, i_s)
+        # re-weight: np.where(np.isin(w_next, w_s), w_next / np.sum(w_s), 0)
+        return w_next
+
+    # def g(self, w_next):
+    #     i_s = np.argsort(w_next)[::-1][: self.card]
+    #     w_s = w_next[i_s]
+    #     return np.where(np.isin(w_next, w_s), w_next / np.sum(w_s), 0)
+
+    def _rand_gen(self, size: tuple):
+        # generator
+        rng = np.random.default_rng()
+        arr = rng.random(size)
+        # Set the first (total - card) elements to 0
+        arr[: -self.card] = 0
+        # Normalize so it sums to 1
+        arr = arr / arr.sum()
+        # Shuffle vector around
+        rng.shuffle(arr)
+        return arr
+
+    def _hard_thresh(self, val, rho):
+        # Not implemented
+        if (1 / 2) * np.abs(val) ** 2 < rho:
+            return 0
+        else:
+            return val
+
+    def _soft_thresh(self, val, kappa):
+        if val < -kappa:
+            return val + kappa
+        elif val > kappa:
+            return val - kappa
+        else:
+            return 0
+
+    def _saturation(self, val, l, u):
+        if val < l:
+            return l
+        elif val > u:
+            return u
+        else:
+            return val
+
+    def _get_index_weights(self, t):
+        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
+        index_weights = market_cap / market_cap.sum()
+        index_weights["Cash"] = 0
+        return index_weights
+
+
+class badCardTrackingSinglePeriodOpt(BasePolicy):
+    """This is old code. keeping for archiving purposes"""
+
     def __init__(
         self,
         return_forecast,
