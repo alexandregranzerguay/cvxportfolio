@@ -21,6 +21,7 @@ import pandas as pd
 import numpy as np
 import logging
 import cvxpy as cvx
+import ncvx as nc
 
 # import numdifftools as nd
 import traceback
@@ -47,6 +48,7 @@ __all__ = [
     "PADMCardinalitySPO",
     "ADMCardinalitySPO",
     "FastADMCardinalitySPO",
+    "NCVXCardinalitySPO",
 ]
 
 
@@ -839,6 +841,8 @@ class CardinalitySPO(BasePolicy):
             z = self.ADM(t)
         elif self.method == "FastADM":
             z = self.FastADM(t)
+        elif self.method == "NCVX":
+            z = self.NCVX(t)
 
         return pd.Series(index=portfolio.index, data=(z * self.value))
 
@@ -1213,6 +1217,61 @@ class ADMCardinalitySPO(CardinalitySPO):
         except Exception as e:
             print(e)
             print("Error solving g() part of the problem")
+
+
+class NCVXCardinalitySPO(CardinalitySPO):
+    # Does not work at the moment
+    def __init__(self, **kwargs):
+        self.method = "NCVX"
+        super().__init__(**kwargs)
+
+    def NCVX(self, t):
+        # z = cvx.Variable(self.w.size)
+        w_next = nc.Card(self.w.size, self.card, 1).flatten()
+        z = w_next - self.w
+
+        # Objective Function
+        ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
+
+        # assert tracking_term.is_convex()
+        assert ret.is_convex()
+
+        # Additional Costs & Constraints
+        costs, constraints = [], []
+
+        for cost in self.costs:
+            cost_expr, const_expr = cost.weight_expr(t, w_next, z, self.value)
+            costs.append(cost_expr)
+            constraints += const_expr
+
+        for item in (con.weight_expr(t, w_next, z, self.value) for con in self.constraints):
+            if isinstance(item, list):
+                constraints += item
+            else:
+                constraints += [item]
+
+        for el in costs:
+            assert el.is_convex()
+
+        for el in constraints:
+            assert el.is_dcp()
+
+        obj = cvx.Minimize(ret + sum(costs))
+        prob = cvx.Problem(obj, [cvx.sum(w_next) == 1] + constraints)
+        try:
+            # prob.solve(solver=self.solver, **self.solver_opts)
+            prob.solve(method="NC-ADMM")
+            if prob.status == "unbounded":
+                logging.error("The problem is unbounded. Defaulting to no trades")
+                return self._nulltrade(self.portfolio)
+
+            if prob.status == "infeasible":
+                logging.error("The problem is infeasible. Defaulting to no trades")
+                return self._nulltrade(self.portfolio)
+            return z.value
+        except Exception as e:
+            print(e)
+            print("Error solving f() part of the problem")
 
 
 class badCardTrackingSinglePeriodOpt(BasePolicy):
