@@ -957,6 +957,7 @@ class FastADMCardinalitySPO(CardinalitySPO):
     def __init__(self, mu=1e-4, **kwargs):
         self.method = "FastADM"
         self.mu_start = mu
+        self.h = 1e-4
         super().__init__(**kwargs)
 
     def FastADM(self, t):
@@ -964,10 +965,11 @@ class FastADMCardinalitySPO(CardinalitySPO):
         y_next = self._rand_gen(self.w.size)
         iteration = 0
         u = 0
-        mu = self.mu_start
+        gamma = 1
+
         while True:
-            w_next = self.f(y_next - u, mu, t)
-            y_next = self.g(w_next + u)
+            w_next, z_w = self.f(y_next - u, t)
+            y_next, z_y = self.g(w_next + u, gamma)
 
             # Check stopping criteria
             if iteration == 0:
@@ -977,20 +979,30 @@ class FastADMCardinalitySPO(CardinalitySPO):
                 diff = np.linalg.norm((w_next - y_next), 1)
 
                 if (diff_last - diff) ** 2 < self.THRESH:
-                    z = y_next - self.w.value
-                    return z
+                    # z = y_next - self.w.value
+                    return z_y
 
                 if iteration >= self.MAX_ITER:
                     print("Max iter reached - not optimal!")
-                    z = y_next - self.w.value
-                    return z
+                    # z = y_next - self.w.value
+                    return z_y
 
             # Update
-            mu *= 1.1
+            gamma = self._max_grad_back(w_next, z_w, t, self.h)
             u = u + w_next - y_next
             iteration += 1
 
-    def f(self, y, mu, t):
+    def eval_f(self, w, z, t):
+        ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w, w_index=self.w_index)
+        costs = []
+        for cost in self.costs:
+            cost_expr, const_expr = cost.weight_expr(t, w, z, self.value)
+            costs.append(cost_expr)
+
+        temp = ret + sum(costs)
+        return ret + sum(costs)
+
+    def f(self, y, t):
         z = cvx.Variable(self.w.size)
         w_next = self.w + z
 
@@ -1038,12 +1050,12 @@ class FastADMCardinalitySPO(CardinalitySPO):
             if prob.status == "infeasible":
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(self.portfolio)
-            return w_next.value
+            return w_next.value, z.value
         except Exception as e:
             print(e)
             print("Error solving f() part of the problem")
 
-    def g(self, w_next):
+    def g(self, w_next, gamma):
         """Proximal operator for I_B(x) + gamma * phi_k(x)
         This function requires the calculation of the gradient TODO: Will implement at a later time to compare
 
@@ -1054,19 +1066,20 @@ class FastADMCardinalitySPO(CardinalitySPO):
         # Sorting incoming vector
         i_s = np.argsort(w_next)[::-1]
 
-        kappa = 1  # Can change this later to be = max(gradient(f)) - see paper by gonjac
+        # kappa = 1  # Can change this later to be = max(gradient(f)) - see paper by gonjac
 
         def prox_op(val, idx):
             for init_i, sorted_i in enumerate(idx):
                 if init_i > self.card:
-                    val[sorted_i] = self._saturation(self._soft_thresh(val[sorted_i], kappa), 0, 1)
+                    val[sorted_i] = self._saturation(self._soft_thresh(val[sorted_i], gamma), 0, 1)
                 else:
                     val[sorted_i] = self._saturation(val[sorted_i], 0, 1)
 
         prox_op(w_next, i_s)
         # re-weight
         w_next = w_next / w_next.sum()
-        return w_next
+        z = w_next - self.w.value
+        return w_next, z
 
     def _rand_gen(self, size: tuple):
         # generator
@@ -1102,6 +1115,25 @@ class FastADMCardinalitySPO(CardinalitySPO):
             return u
         else:
             return val
+
+    # a function that returns one standard basis function
+    def _basis_vec(self, ndim, index):
+        v = np.zeros(ndim)
+        v[index] = 1.0
+        return v
+
+    def _max_grad_back(self, w, z, t, h):
+        h_ndim = w.size
+        return np.max(
+            np.abs(
+                np.array(
+                    [
+                        (self.eval_f(w, z, t).value - self.eval_f(w - h * self._basis_vec(h_ndim, i), z, t).value) / h
+                        for i in range(h_ndim)
+                    ]
+                )
+            )
+        )
 
 
 class ADMCardinalitySPO(CardinalitySPO):
@@ -1272,300 +1304,3 @@ class NCVXCardinalitySPO(CardinalitySPO):
         except Exception as e:
             print(e)
             print("Error solving f() part of the problem")
-
-
-class badCardTrackingSinglePeriodOpt(BasePolicy):
-    """This is old code. keeping for archiving purposes"""
-
-    def __init__(
-        self,
-        return_forecast,
-        returns_index,
-        costs,
-        constraints,
-        cardinality,
-        epsilon=10**-1,
-        max_iter=100,
-        h=0.1,
-        penalty=1,
-        approx_gradient=False,
-        solver=None,
-        solver_opts=None,
-    ):
-
-        if not isinstance(return_forecast, BaseReturnsModel):
-            null_checker(return_forecast)
-
-        self.return_forecast = return_forecast
-        self.returns_index = returns_index
-        self.cardinality = cardinality
-
-        # Upper and Lower bound for saturation function
-        self.upper = 1
-        self.lower = 0
-
-        # Start soft-thresholding parameter (also represents weighting param)
-        self.gamma = 1
-
-        self.max_iter = max_iter
-        self.epsilon = epsilon
-        self.h = h
-        self.penalty = penalty
-        super(CardTrackingSinglePeriodOpt, self).__init__()
-
-        for cost in costs:
-            assert isinstance(cost, BaseCost)
-            self.costs.append(cost)
-
-        for constraint in constraints:
-            assert isinstance(constraint, BaseConstraint)
-            self.constraints.append(constraint)
-
-        self.solver = solver
-        self.solver_opts = {} if solver_opts is None else solver_opts
-
-    def get_trades(self, portfolio, t=None):
-        """
-        Get optimal trade vector for given portfolio at time t.
-
-        Parameters
-        ----------
-        portfolio : pd.Series
-            Current portfolio vector.
-        t : pd.timestamp
-            Timestamp for the optimization.
-        """
-        if t is None:
-            t = dt.datetime.today()
-        value = sum(portfolio)
-        w = portfolio / value
-
-        # Initialize error term
-        u = np.zeros(w.size)
-
-        # Initialization Variables
-        self.z = cvx.Variable(w.size)
-        self.wplus = w.values + self.z
-        # Initial cardinality compliant array
-        arr = np.array([value / self.cardinality] * self.cardinality + [0] * (w.size - self.cardinality))
-        self.y = cvx.Parameter(shape=w.size, value=arr)
-
-        iter = 0
-        delta = self.epsilon
-
-        while not self._endloop(iter, delta):
-            # Store values from x(t-1)
-            if not iter == 0:
-                prev_wplus = self.wplus.value
-                prev_f = self.prob.value
-            # TODO: See if it makes sense to include opt in f(x)
-            obj, constraints = self.f(value, t, u)
-            self.prob = cvx.Problem(cvx.Minimize(obj), [cvx.sum(self.z) == 0] + constraints)
-
-            # Attempt to solve f(x)
-            try:
-                self.prob.solve(solver=self.solver, **self.solver_opts)
-
-                # Check if unbounded
-                if self.prob.status == "unbounded":
-                    logging.error("The problem is unbounded. Defaulting to no trades")
-                    return self._nulltrade(portfolio)
-
-                # Check if unfeasible
-                if self.prob.status == "infeasible":
-                    logging.error("The problem is infeasible. Defaulting to no trades")
-                    return self._nulltrade(portfolio)
-            except (cvx.SolverError, TypeError) as e:
-                logging.error(e)
-                logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
-                return self._nulltrade(portfolio)
-
-            # Optimal weights in g(x)
-            self.y.value = self.g(u)
-
-            # Update error term
-            u = u + self.wplus.value - self.y.value
-
-            # Update gamma
-            self.gamma = self._max_grad_back(self.wplus.value, self.z.value, self.y.value, u, value, t, self.h)
-
-            # Update stopping criteria stuff
-
-            # Currently delta is only f(xt+1)-f(xt)/f(xt)
-            # TODO: Include g(x) but g(x) is a vector so not sure how to include it
-            if iter == 0:
-                delta = self.epsilon
-            else:
-                delta = (prev_f - self.prob.value) / prev_f
-
-            iter += 1
-        print(iter)
-        return pd.Series(index=portfolio.index, data=(self.z.value * value))
-
-    def f(self, portf_value, t, u):
-        # y.value is the current optimal weights from g(x)
-        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(self.returns_index, BaseReturnsModel):
-            diff = cvx.square(self.returns_index.weight_expr(t) - self.return_forecast.weight_expr(t, self.wplus))
-            tracking_term = cvx.huber(diff, 0.1)
-        else:
-            # TODO: Properly implement this if I want
-            # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
-            # tracking_term = cvx.sum(cvx.multiply(
-            #     values_in_time(self.return_forecast, t).values,
-            #     wplus))
-            logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
-
-        # Penalty for distance from sparse vector
-        # TODO: Understand the penalty factor rho
-        pen = self.penalty * cvx.sum_squares(self.wplus - (self.y - u))
-        # pen = 0
-        assert tracking_term.is_convex()
-
-        # Initialize Constraints
-        costs, constraints = [], []
-
-        for cost in self.costs:
-            cost_expr, const_expr = cost.weight_expr(t, self.wplus, self.z, portf_value)
-            costs.append(cost_expr)
-            constraints += const_expr
-
-        for item in (con.weight_expr(t, self.wplus, self.z, portf_value) for con in self.constraints):
-            if isinstance(item, list):
-                constraints += item
-            else:
-                constraints += [item]
-
-        for el in costs:
-            assert el.is_convex()
-
-        for el in constraints:
-            assert el.is_dcp()
-
-        # Return f(x)
-        return tracking_term + pen + sum(costs), constraints
-
-    def F(self, w, z, y, u, portf_value, t):
-        # y.value is the current optimal weights from g(x)
-        if isinstance(self.return_forecast, BaseReturnsModel) and isinstance(self.returns_index, BaseReturnsModel):
-            diff = cvx.square(self.returns_index.weight_expr(t) - self.return_forecast.weight_expr(t, w))
-            tracking_term = cvx.huber(diff, 0.1)
-        else:
-            # TODO: Properly implement this if I want
-            # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
-            # tracking_term = cvx.sum(cvx.multiply(
-            #     values_in_time(self.return_forecast, t).values,
-            #     wplus))
-            logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
-
-        # Penalty for distance from sparse vector
-        pen = self.penalty * cvx.norm(w - (y - u), 1)
-        # pen = 0
-        # Initialize Constraints
-
-        costs, constraints = [], []
-
-        for cost in self.costs:
-            cost_expr, const_expr = cost.weight_expr(t, w, z, portf_value)
-            costs.append(cost_expr)
-            constraints += const_expr
-
-        for item in (con.weight_expr(t, w, z, portf_value) for con in self.constraints):
-            if isinstance(item, list):
-                constraints += item
-            else:
-                constraints += [item]
-
-        for el in costs:
-            assert el.is_convex()
-
-        # for el in constraints:
-        #     assert el.is_dcp()
-
-        # Return f(x)
-        return tracking_term + pen + sum(costs), constraints
-
-    def g(self, u):
-        # wplus.value is the current optimal weights from f(x)
-        w = self.wplus.value + u
-        wcopy = w.copy()
-        idx = np.argsort(-w)
-        for i, j in enumerate(idx):
-            wcopy[j] = self._proj_map(w[j], i)
-        return wcopy
-
-    def _proj_map(self, val, idx):
-        if idx > self.cardinality:
-            return self._saturation(self._soft_thresh(val, self.gamma), self.lower, self.upper)
-        else:
-            return self._saturation(val, self.lower, self.upper)
-
-    def _soft_thresh(self, val, kappa):
-        if val < -kappa:
-            return val + kappa
-        elif val > kappa:
-            return val - kappa
-        else:
-            return 0
-
-    def _saturation(self, val, l, u):
-        if val < l:
-            return l
-        elif val > u:
-            return u
-        else:
-            return val
-
-    # def _max_grad(self, f, x):
-    #   this uses numdifftools
-    #     return np.max(np.abs(nd.Gradient(f)(x)))
-
-    # a function that return one standard basis function
-    def _basis_vec(self, ndim, index):
-        v = np.zeros(ndim)
-        v[index] = 1.0
-        return v
-
-    # This does not work because costs are cvx expr.
-    # def _grad_f(self, w, z, t, portf_value):
-    #     diff = np.square(self.returns_index.weight_expr(t)
-    #             - self.return_forecast.weight_expr(t, w)
-    #         )
-    #     tracking_term = self._huber(diff, 0.1)
-
-    #     costs, constraints = [], []
-
-    #     for cost in self.costs:
-    #         cost_expr, const_expr = cost.weight_expr(t, w, z, portf_value)
-    #         costs.append(cost_expr)
-
-    # def _huber(value, M):
-    #     thresh = np.abs(value) < M
-    #     squared_loss = np.square(value) / 2
-    #     linear_loss  = np.abs(value) - 0.5
-    #     return np.where(thresh, squared_loss, linear_loss)
-
-    # compute gradient by backward finite difference method
-    def _max_grad_back(self, w, z, y, u, portf_value, t, h):
-        h_ndim = w.size
-        return np.max(
-            np.abs(
-                np.array(
-                    [
-                        (
-                            self.F(w, z, y, u, portf_value, t)[0].value
-                            - self.F(w - h * self._basis_vec(h_ndim, i), z, y, u, portf_value, t)[0].value
-                        )
-                        / h
-                        for i in range(h_ndim)
-                    ]
-                )
-            )
-        )
-
-    def _endloop(self, iter, delta):
-        if iter == self.max_iter:
-            return True
-        elif delta < self.epsilon:
-            return True
-        else:
-            return False
