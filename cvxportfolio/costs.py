@@ -77,19 +77,13 @@ class HcostModel(BaseCost):
             w_plus = w_plus[:-1]  # TODO fix when cvxpy pandas ready
 
         try:
-            self.expression = cvx.multiply(
-                values_in_time(self.borrow_costs, t), cvx.neg(w_plus)
-            )
+            self.expression = cvx.multiply(values_in_time(self.borrow_costs, t), cvx.neg(w_plus))
         except TypeError:
-            self.expression = cvx.multiply(
-                values_in_time(self.borrow_costs, t).values, cvx.neg(w_plus)
-            )
+            self.expression = cvx.multiply(values_in_time(self.borrow_costs, t).values, cvx.neg(w_plus))
         try:
             self.expression -= cvx.multiply(values_in_time(self.dividends, t), w_plus)
         except TypeError:
-            self.expression -= cvx.multiply(
-                values_in_time(self.dividends, t).values, w_plus
-            )
+            self.expression -= cvx.multiply(values_in_time(self.dividends, t).values, w_plus)
 
         return cvx.sum(self.expression), []
 
@@ -97,9 +91,7 @@ class HcostModel(BaseCost):
         return self._estimate(t, w_plus, z, value)
 
     def value_expr(self, t, h_plus, u):
-        self.last_cost = -np.minimum(0, h_plus.iloc[:-1]) * values_in_time(
-            self.borrow_costs, t
-        )
+        self.last_cost = -np.minimum(0, h_plus.iloc[:-1]) * values_in_time(self.borrow_costs, t)
         self.last_cost -= h_plus.iloc[:-1] * values_in_time(self.dividends, t)
 
         return sum(self.last_cost)
@@ -155,12 +147,15 @@ class TcostModel(BaseCost):
         Returns:
           An expression for the tcosts.
         """
-
-        try:
-            z = z[z.index != self.cash_key]
-            z = z.values
-        except AttributeError:
-            z = z[:-1]  # TODO fix when cvxpy pandas ready
+        if z.size == 1:
+            # z is a scalar
+            pass
+        else:
+            try:
+                z = z[z.index != self.cash_key]
+                z = z.values
+            except AttributeError:
+                z = z[:-1]  # TODO fix when cvxpy pandas ready
 
         constr = []
 
@@ -182,32 +177,22 @@ class TcostModel(BaseCost):
             constr += [z[second_term.index.get_loc(tick)] == 0 for tick in no_trade]
 
         try:
-            self.expression = cvx.multiply(
-                values_in_time(self.half_spread, t), cvx.abs(z)
-            )
+            self.expression = cvx.multiply(values_in_time(self.half_spread, t), cvx.abs(z))
         except TypeError:
-            self.expression = cvx.multiply(
-                values_in_time(self.half_spread, t).values, cvx.abs(z)
-            )
+            self.expression = cvx.multiply(values_in_time(self.half_spread, t).values, cvx.abs(z))
         try:
             self.expression += cvx.multiply(second_term, cvx.abs(z) ** self.power)
         except TypeError:
-            self.expression += cvx.multiply(
-                second_term.values, cvx.abs(z) ** self.power
-            )
+            self.expression += cvx.multiply(second_term.values, cvx.abs(z) ** self.power)
 
         return cvx.sum(self.expression), constr
 
     def value_expr(self, t, h_plus, u):
 
         u_nc = u.iloc[:-1]
-        self.tmp_tcosts = np.abs(u_nc) * values_in_time(
-            self.half_spread, t
-        ) + values_in_time(self.nonlin_coeff, t) * values_in_time(
-            self.sigma, t
-        ) * np.abs(
-            u_nc
-        ) ** self.power / (
+        self.tmp_tcosts = np.abs(u_nc) * values_in_time(self.half_spread, t) + values_in_time(
+            self.nonlin_coeff, t
+        ) * values_in_time(self.sigma, t) * np.abs(u_nc) ** self.power / (
             values_in_time(self.volume, t) ** (self.power - 1)
         )
 

@@ -14,24 +14,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from abc import ABCMeta, abstractmethod
 import datetime as dt
-from inspect import Parameter
-import pandas as pd
-import numpy as np
 import logging
-import cvxpy as cvx
-import ncvx as nc
+import sys
 
 # import numdifftools as nd
 import traceback
-import sys
+from abc import ABCMeta, abstractmethod
+from inspect import Parameter
+from itertools import repeat
 
-from .costs import BaseCost
+import cvxpy as cvx
+import multiprocess
+import ncvx as nc
+import numpy as np
+import pandas as pd
+
+from .constraints import BaseConstraint, IndexUpdater, TrackingErrorMax
+from .costs import BaseCost, TcostModel
 from .returns import BaseReturnsModel
-from .constraints import BaseConstraint, TrackingErrorMax, IndexUpdater
-from .utils import values_in_time, null_checker
-
+from .utils import null_checker, values_in_time
 
 __all__ = [
     "Hold",
@@ -47,17 +49,20 @@ __all__ = [
     "QuadTrackingMultiPeriodOpt",
     "PADMCardinalitySPO",
     "ADMCardinalitySPO",
-    "FastADMCardinalitySPO",
     "NCVXCardinalitySPO",
+    "PADMCardinalityMPO",
+    "ADMCardinalityMPO",
 ]
 
 
 class BasePolicy(object, metaclass=ABCMeta):
     """Base class for a trading policy."""
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         self.costs = []
         self.constraints = []
+        # Add any other keyword args to the class dict
+        self.__dict__.update(kwargs)
 
     @abstractmethod
     def get_trades(self, portfolio, t=dt.datetime.today()):
@@ -778,7 +783,7 @@ class CardinalitySPO(BasePolicy):
         constraints,
         gamma_excess,
         card,
-        thresh=1e-6,
+        thresh=1e-5,
         max_iter=10,
         solver=None,
         solver_opts=None,
@@ -796,10 +801,6 @@ class CardinalitySPO(BasePolicy):
         self.card = card
         self.THRESH = thresh
         self.MAX_ITER = max_iter
-
-        # Add any other keyword args to the class dict
-        self.__dict__.update(kwargs)
-
         super().__init__()
 
         for cost in costs:
@@ -839,8 +840,6 @@ class CardinalitySPO(BasePolicy):
             z = self.PADM(t)
         elif self.method == "ADM":
             z = self.ADM(t)
-        elif self.method == "FastADM":
-            z = self.FastADM(t)
         elif self.method == "NCVX":
             z = self.NCVX(t)
 
@@ -858,6 +857,25 @@ class CardinalitySPO(BasePolicy):
         index_weights["Cash"] = 0
         return index_weights
 
+    def _rand_gen(self, size: tuple):
+        # generator
+        rng = np.random.default_rng()
+        arr = rng.random(size)
+        # Set the first (total - card) elements to 0
+        arr[: -self.card] = 0
+        # Normalize so it sums to 1
+        arr = arr / arr.sum()
+        # Shuffle vector around
+        rng.shuffle(arr)
+        return arr
+
+    def _hasImproved(self, prev, curr, thresh):
+        print(np.linalg.norm((prev - curr), 2) ** 2)
+        return np.linalg.norm((prev - curr), 2) ** 2 < thresh
+
+    def _distance(self, prev, curr):
+        return np.linalg.norm((prev - curr), 2) ** 2
+
 
 class PADMCardinalitySPO(CardinalitySPO):
     """This is a crude implementation of PADM - see PADM-Cardinality Constrained Portfolio[73]"""
@@ -868,7 +886,8 @@ class PADMCardinalitySPO(CardinalitySPO):
         super().__init__(**kwargs)
 
     def PADM(self, t):
-        y_next = self.w
+        # y_next = self.w
+        y_next = self._rand_gen(self.w.size)
         iteration = 0
         mu = self.mu_start
         while True:
@@ -877,12 +896,15 @@ class PADMCardinalitySPO(CardinalitySPO):
 
             # Check stopping criteria
             if iteration == 0:
-                diff = np.linalg.norm((w_next - y_next), 1)
+                # diff = np.linalg.norm((w_next - y_next), 1)
+                diff = self._distance(w_next, y_next)
             else:
                 diff_last = diff
-                diff = np.linalg.norm((w_next - y_next), 1)
-
-                if (diff_last - diff) ** 2 < self.THRESH:
+                # diff = np.linalg.norm((w_next - y_next), 1)
+                diff = self._distance(w_next, y_next)
+                diff_calc = np.abs(diff_last - diff)
+                # if self._distance(diff_last, diff) < self.THRESH:
+                if diff_calc < self.THRESH:
                     z = y_next - self.w.value
                     return z
 
@@ -949,18 +971,167 @@ class PADMCardinalitySPO(CardinalitySPO):
         return np.where(np.isin(w_next, w_s), w_next / np.sum(w_s), 0)
 
 
-class FastADMCardinalitySPO(CardinalitySPO):
+class PADMCardinalityMPO(PADMCardinalitySPO):
+    def __init__(
+        self, trading_times: list, terminal_weights: pd.DataFrame, lookahead_periods: int = None, *args, **kwargs
+    ):
+        """
+        trading_times: list, all times at which get_trades will be called
+        lookahead_periods: int or None. if None uses all remaining periods
+        index_weights: Dataframe or array of weights at each time t, or constant over time
+        Q: list of Q matrix for each time step
+        """
+        # Number of periods to look ahead.
+        self.lookahead_periods = lookahead_periods
+        self.trading_times = trading_times
+        self.terminal_weights = terminal_weights
+        super().__init__(*args, **kwargs)
+
+    def get_trades(self, portfolio, t=dt.datetime.today()):
+
+        self.portfolio = portfolio
+        self.value = sum(self.portfolio)
+        self.w_index = self._get_index_weights(t)
+        assert self.value > 0.0
+        self.w = self.portfolio.values / self.value
+
+        # planning_periods = self.lookahead_model.get_periods(t)
+        tau_times = self.trading_times[
+            self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
+        ]
+
+        iteration = 0
+        mu = self.mu_start
+        y = np.array([self.w] * 3)
+        while True:
+            # W incorporates return and TE and outter w_plus
+            w = self.f(self.w, y, mu, t, tau_times)
+            # y incorporates cardinality constraint
+            y = self.g(w)
+
+            # Check stopping criteria
+            if iteration == 0:
+                diff = self._distance(w, y)
+            else:
+                diff_last = diff
+                diff = self._distance(w, y)
+                diff_calc = np.abs(diff_last - diff)
+                if diff_calc < self.THRESH:
+                    break
+
+                if iteration >= self.MAX_ITER:
+                    logging.info("Max iter reached - not optimal!")
+                    break
+
+            mu *= 10
+            iteration += 1
+
+        z = y[0] - self.w
+        return pd.Series(index=portfolio.index, data=(z * self.value))
+
+    def f(self, w_init, y, mu, t, tau_times):
+        prob_arr = []
+        z_vars = []
+        w_vars = []
+
+        for i, tau in enumerate(tau_times):
+            z = cvx.Variable(w_init.size)
+            wplus = w_init + z
+
+            # Objective Function
+            ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(
+                t, tau, wplus=wplus, w_index=self.w_index
+            )
+
+            # l1 penalty term
+            ret += mu * cvx.norm(wplus - y[i], 1)
+
+            # assert tracking_term.is_convex()
+            assert ret.is_convex()
+
+            # Additional Costs & Constraints
+            costs, constraints = [], []
+
+            for cost in self.costs:
+                cost_expr, const_expr = cost.weight_expr(t, wplus, z, self.value)
+                costs.append(cost_expr)
+                constraints += const_expr
+
+            for item in (con.weight_expr(t, wplus, z, self.value) for con in self.constraints):
+                if isinstance(item, list):
+                    constraints += item
+                else:
+                    constraints += [item]
+
+            for el in costs:
+                assert el.is_convex()
+
+            for el in constraints:
+                assert el.is_dcp()
+
+            # obj = cvx.Minimize(tracking_term + sum(costs))
+            obj = cvx.Minimize(ret + sum(costs))
+            prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
+            prob_arr.append(prob)
+            z_vars.append(z)
+            w_vars.append(wplus)
+            w = wplus
+
+        # Terminal constraint.
+        if self.terminal_weights is not None:
+            prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
+
+        # We are summing all problems in order to obtain overall objective
+        self.prob = sum(prob_arr)
+        try:
+            self.prob.solve(solver=self.solver, **self.solver_opts)
+            if self.prob.status == "unbounded":
+                logging.error("The problem is unbounded. Defaulting to no trades")
+                return self._nulltrade(self.portfolio)
+
+            if self.prob.status == "infeasible":
+                logging.error("The problem is infeasible. Defaulting to no trades")
+                return self._nulltrade(self.portfolio)
+
+            return self.optToArr(w_vars)
+        except (cvx.SolverError, TypeError) as e:
+            logging.error(e)
+            logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
+            return self._nulltrade(self.portfolio)
+
+    def g(self, w_arr):
+        y_arr = np.zeros(w_arr.shape)
+
+        def get_prox(w):
+            i_s = np.argsort(w)[::-1][: self.card]
+            w_s = w[i_s]
+            return np.where(np.isin(w, w_s), w / np.sum(w_s), 0)
+
+        for i, row in enumerate(w_arr):
+            y_arr[i] = get_prox(row)
+
+        return y_arr
+
+    def optToArr(self, l):
+        arr_l = list()
+        for el in l:
+            arr_l.append(el.value)
+        return np.array(arr_l)
+
+
+class ADMCardinalitySPO(CardinalitySPO):
     """This is the implementation of ADMM - see A Novel Approach for Solving Convex Problems with Cardinality Constraints,
     prox_algs (boyd).
     """
 
     def __init__(self, mu=1e-4, **kwargs):
-        self.method = "FastADM"
+        self.method = "ADM"
         self.mu_start = mu
         self.h = 1e-4
+        self.hard = False
         super().__init__(**kwargs)
 
-    def FastADM(self, t):
+    def ADM(self, t):
         # Initialize y_next
         y_next = self._rand_gen(self.w.size)
         iteration = 0
@@ -973,12 +1144,15 @@ class FastADMCardinalitySPO(CardinalitySPO):
 
             # Check stopping criteria
             if iteration == 0:
-                diff = np.linalg.norm((w_next - y_next), 1)
+                # diff = np.linalg.norm((w_next - y_next), 1)
+                diff = self._distance(w_next, y_next)
             else:
                 diff_last = diff
-                diff = np.linalg.norm((w_next - y_next), 1)
-
-                if (diff_last - diff) ** 2 < self.THRESH:
+                # diff = np.linalg.norm((w_next - y_next), 1)
+                diff = self._distance(w_next, y_next)
+                diff_calc = np.abs(diff_last - diff)
+                # if self._distance(diff_last, diff) < self.THRESH:
+                if diff_calc < self.THRESH:
                     # z = y_next - self.w.value
                     return z_y
 
@@ -1014,7 +1188,7 @@ class FastADMCardinalitySPO(CardinalitySPO):
 
         # Proximality term 1/2||x-z||^2
         gamma = 1  # TBD if I want to change this
-        ret += 1 / (2 * gamma) * cvx.square(cvx.norm(w_next - y, 2))
+        ret += (1 / (2 * gamma)) * cvx.square(cvx.norm(w_next - y, 2))
 
         # assert tracking_term.is_convex()
         assert ret.is_convex()
@@ -1069,11 +1243,20 @@ class FastADMCardinalitySPO(CardinalitySPO):
         # kappa = 1  # Can change this later to be = max(gradient(f)) - see paper by gonjac
 
         def prox_op(val, idx):
-            for init_i, sorted_i in enumerate(idx):
-                if init_i > self.card:
-                    val[sorted_i] = self._saturation(self._soft_thresh(val[sorted_i], gamma), 0, 1)
-                else:
-                    val[sorted_i] = self._saturation(val[sorted_i], 0, 1)
+            if self.hard == True:
+                # A version of hard thresholding where sqrt(2rho) = first el that exceeds card
+                # Note this is effectively the same as PADM method
+                for init_i, sorted_i in enumerate(idx):
+                    if init_i > self.card:
+                        val[sorted_i] = 0
+                    else:
+                        continue
+            else:
+                for init_i, sorted_i in enumerate(idx):
+                    if init_i > self.card:
+                        val[sorted_i] = self._saturation(self._soft_thresh(val[sorted_i], gamma), 0, 1)
+                    else:
+                        val[sorted_i] = self._saturation(val[sorted_i], 0, 1)
 
         prox_op(w_next, i_s)
         # re-weight
@@ -1081,24 +1264,12 @@ class FastADMCardinalitySPO(CardinalitySPO):
         z = w_next - self.w.value
         return w_next, z
 
-    def _rand_gen(self, size: tuple):
-        # generator
-        rng = np.random.default_rng()
-        arr = rng.random(size)
-        # Set the first (total - card) elements to 0
-        arr[: -self.card] = 0
-        # Normalize so it sums to 1
-        arr = arr / arr.sum()
-        # Shuffle vector around
-        rng.shuffle(arr)
-        return arr
-
-    def _hard_thresh(self, val, rho):
-        # Not implemented
-        if (1 / 2) * np.abs(val) ** 2 < rho:
-            return 0
-        else:
-            return val
+    # def _hard_thresh(self, val, thresh):
+    #     # Not implemented
+    #     if val < thresh:
+    #         return 0
+    #     else:
+    #         return val
 
     def _soft_thresh(self, val, kappa):
         if val < -kappa:
@@ -1136,48 +1307,138 @@ class FastADMCardinalitySPO(CardinalitySPO):
         )
 
 
-class ADMCardinalitySPO(CardinalitySPO):
-    def __init__(self, mu=1e-4, **kwargs):
-        self.method = "ADM"
-        super().__init__(**kwargs)
+class ADMCardinalityMPO(ADMCardinalitySPO):
+    def __init__(
+        self, trading_times: list, terminal_weights: pd.DataFrame, lookahead_periods: int = None, *args, **kwargs
+    ):
+        """
+        trading_times: list, all times at which get_trades will be called
+        lookahead_periods: int or None. if None uses all remaining periods
+        index_weights: Dataframe or array of weights at each time t, or constant over time
+        Q: list of Q matrix for each time step
+        """
+        # Number of periods to look ahead.
+        self.lookahead_periods = lookahead_periods
+        self.trading_times = trading_times
+        self.terminal_weights = terminal_weights
+        super().__init__(*args, **kwargs)
 
-    def ADM(self, t):
-        y_next = self.w
-        iteration = 0
-        u = 0
+    def get_trades(self, portfolio, t=dt.datetime.today()):
+
+        self.portfolio = portfolio
+        self.value = sum(self.portfolio)
+        self.w_index = self._get_index_weights(t)
+        assert self.value > 0.0
+        self.w = self.portfolio.values / self.value
+
+        # planning_periods = self.lookahead_model.get_periods(t)
+        tau_times = self.trading_times[
+            self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
+        ]
+        # Skeleton
+        # n: number of assets
+        # T: lookaheads periods
+        # z_next = cvx.Variable((len(tau_times), self.w.size), value=np.zeros((len(tau_times), self.w.size))).value
+        z_next = np.zeros((len(tau_times), self.w.size))
+        w_next_cost = np.zeros((len(tau_times), self.w.size))
+        gamma = 1
+        u = np.zeros((len(tau_times), self.w.size))
         while True:
-            w_next = self.f(y_next - u, t)
-            y_next = self.g(w_next + u)
+            # w_prev = w_next.copy()
+            # z_prev = z_next.copy()
+
+            # w_next opt:
+            num_workers = min(multiprocess.cpu_count(), len(tau_times))
+            num_workers = 1
+            workers = multiprocess.Pool(num_workers)
+            w_next_cost = w_next_cost - u
+            w_rows = [self.w] + [row for row in w_next_cost[:-1]]
+            z_rows = [row for row in z_next]
+            zipped_args = zip(w_rows, z_rows, repeat(gamma), repeat(t), tau_times)
+            w_next_stage = np.array(workers.starmap(self.PADM, zipped_args))
+
+            # z_next opt:
+            w_next_stage = w_next_stage + u
+            num_workers = min(multiprocess.cpu_count(), w_next_stage.shape[1])
+            workers = multiprocess.Pool(num_workers)
+            w_init_cols = [asset for asset in self.w]
+            w_next_cols = [row for row in w_next_stage.T]
+            zipped_args = zip(w_init_cols, w_next_cols, repeat(gamma), repeat(tau_times))
+            for i, el in enumerate(zipped_args):
+                w_next_cost[:, i] = self.prox_schedule(*el)
+            # w_next_cost = np.array(workers.starmap(self.prox_schedule, zipped_args)).T
+
+            if self._hasImproved(w_next_stage, w_next_cost, self.THRESH):
+                break
+
+            # Update error term
+            # u = u + w_next_stage - w_next_cost
+
+        w = np.reshape(self.w, (-1, self.w.size))
+        z_next = np.diff(w_next_stage, axis=0, prepend=w)
+        return pd.Series(index=portfolio.index, data=(z_next[0, :] * self.value))
+
+        # z = cvx.Variable(*w.shape)
+        # wplus = w + z
+
+    def PADM(self, w_prev, z_next, gamma, t, tau):
+        if not isinstance(w_prev, np.ndarray):
+            try:
+                w_prev = np.array(w_prev)
+            except:
+                raise ValueError("Did not pass ndarray or list for w_prev")
+        if not isinstance(z_next, np.ndarray):
+            try:
+                z_next = np.array(z_next)
+            except:
+                raise ValueError("Did not pass ndarray or list for z_next")
+
+        # I cannot use tau here unless I use my return estimates to determine weights.. will add noise
+        w_index = self._get_index_weights(tau)
+
+        # z comes from outter ADMM
+        w_outter = w_prev + z_next
+        iteration = 0
+        mu = self.mu_start
+        y = w_prev
+        while True:
+            # W incorporates return and TE and outter w_plus
+            w = self.f(y, w_outter, mu, w_index, gamma, t, tau)
+            # y incorporates cardinality constraint
+            y = self.g(w)
 
             # Check stopping criteria
             if iteration == 0:
-                diff = np.linalg.norm((w_next - y_next), 1)
+                diff = self._distance(w, y)
             else:
                 diff_last = diff
-                diff = np.linalg.norm((w_next - y_next), 1)
-
-                if (diff_last - diff) ** 2 < self.THRESH:
-                    z = y_next - self.w.value
-                    return z
+                diff = self._distance(w, y)
+                diff_calc = np.abs(diff_last - diff)
+                if diff_calc < self.THRESH:
+                    # z = y_next - self.w.value
+                    return y
 
                 if iteration >= self.MAX_ITER:
-                    print("Max iter reached - not optimal!")
-                    z = y_next - self.w.value
-                    return z
+                    logging.info("Max iter reached - not optimal!")
+                    # z = y_next - self.w.value
+                    return y
 
+            mu *= 10
             iteration += 1
-            u = u + w_next - y_next
 
-    def f(self, y, t):
-        z = cvx.Variable(self.w.size)
-        w_next = self.w + z
+    def f(self, y, w_outter, mu, w_index, gamma, t, tau):
+        # z = cvx.Variable(self.w.size)
+        # w_next = self.w + z
+        w = cvx.Variable(self.w.size)
 
         # Objective Function
-        ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
+        ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus=w, w_index=w_index)
 
-        # Proximality term 1/2||x-z||^2
-        gamma = 1  # TBD if I want to change this
-        ret += 1 / (2 * gamma) * cvx.square(cvx.norm(w_next - y, 2))
+        # l1 penalty term
+        ret += mu * cvx.norm(w - y, 1)
+
+        # Proximal regularization:
+        ret += (1 / (2 * gamma)) * cvx.square(cvx.norm(w - w_outter, 2))
 
         # assert tracking_term.is_convex()
         assert ret.is_convex()
@@ -1186,11 +1447,13 @@ class ADMCardinalitySPO(CardinalitySPO):
         costs, constraints = [], []
 
         for cost in self.costs:
-            cost_expr, const_expr = cost.weight_expr(t, w_next, z, self.value)
+            if isinstance(cost, TcostModel):
+                continue
+            cost_expr, const_expr = cost.weight_expr(t, w, z=None, value=self.value)
             costs.append(cost_expr)
             constraints += const_expr
 
-        for item in (con.weight_expr(t, w_next, z, self.value) for con in self.constraints):
+        for item in (con.weight_expr(t, w, None, self.value) for con in self.constraints):
             if isinstance(item, list):
                 constraints += item
             else:
@@ -1203,7 +1466,7 @@ class ADMCardinalitySPO(CardinalitySPO):
             assert el.is_dcp()
 
         obj = cvx.Minimize(ret + sum(costs))
-        prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
+        prob = cvx.Problem(obj, [sum(w) == 1] + constraints)
         try:
             prob.solve(solver=self.solver, **self.solver_opts)
             if prob.status == "unbounded":
@@ -1213,42 +1476,40 @@ class ADMCardinalitySPO(CardinalitySPO):
             if prob.status == "infeasible":
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(self.portfolio)
-            return w_next.value
+            return w.value
         except Exception as e:
             print(e)
             print("Error solving f() part of the problem")
 
-    def g(self, w_next):
-        z = cvx.Variable(self.w.size)  # TODO pass index
-        y_next = self.w + z
+    def g(self, w):
+        i_s = np.argsort(w)[::-1][: self.card]
+        w_s = w[i_s]
+        return np.where(np.isin(w, w_s), w / np.sum(w_s), 0)
 
-        # Proximality term 1/2||x-z||^2
-        gamma = 1  # TBD if I want to change this
-        prox = 1 / (2 * gamma) * cvx.square(cvx.norm(y_next - w_next, 2))
+    def prox_schedule(self, w_init, w_asset_i, gamma, tau_times):
+        w_z = cvx.Variable(len(w_asset_i))
+        for cost in self.costs:
+            if isinstance(cost, TcostModel):
+                func = cost
+                # obj = cost_expr
+        obj = 0
+        # sum over time periods t = 0 to t + T
+        for i, t in enumerate(tau_times):
 
-        obj = cvx.Minimize(prox)
+            # g(x(t) - x(t-1))
+            if i == 0:
+                obj += func.weight_expr(t=t, w_plus=w_z[i], z=w_z[i] - w_init, value=self.value)[0]
+            else:
+                obj += func.weight_expr(t=t, w_plus=w_z[i], z=w_z[i] - w_z[i - 1], value=self.value)[0]
 
-        constraints = [cvx.sum(z) == 0]
-        y_bool = cvx.Variable(w_next[:-1].shape[0], boolean=True)
-        constraints += [sum(y_bool) <= self.card]
-        for i in range(y_next[:-1].shape[0]):
-            constraints += [y_next[i] <= 1 * y_bool[i]]
+            # proximal regularization:
+            gamma = 1  # TBD if I want to change this
+            obj += (1 / (2 * gamma)) * cvx.square(cvx.norm(w_z[i] - w_asset_i[i], 2))
 
-        prob = cvx.Problem(obj, constraints)
-        try:
-            prob.solve(solver=self.solver, **self.solver_opts)
-            if prob.status == "unbounded":
-                logging.error("The problem is unbounded. Defaulting to no trades")
-                return self._nulltrade(self.portfolio)
+        prob = cvx.Problem(cvx.Minimize(obj))
+        prob.solve(solver=self.solver, **self.solver_opts)
 
-            if prob.status == "infeasible":
-                logging.error("The problem is infeasible. Defaulting to no trades")
-                return self._nulltrade(self.portfolio)
-            # Check that return is correct
-            return y_next.value
-        except Exception as e:
-            print(e)
-            print("Error solving g() part of the problem")
+        return w_z.value
 
 
 class NCVXCardinalitySPO(CardinalitySPO):

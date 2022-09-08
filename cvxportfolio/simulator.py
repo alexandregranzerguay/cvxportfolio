@@ -130,11 +130,7 @@ class MarketSimulator:
                 logging.info("Getting trades at time %s" % t)
                 start = time.time()
                 try:
-                    # u, diff = policy.get_trades(h, t)
                     u = policy.get_trades(h, t)
-                    # results.log_data("diff_obj", t, policy.diff_obj.value)
-                    # results.log_data("index_obj", t, policy.index_obj)
-                    # results.log_data("portfolio_obj", t, policy.portfolio_obj.value)
                 except Exception as e:
                     logging.warning("Solver failed on timestamp %s. Default to no trades." % t)
                     print(e)
@@ -199,11 +195,8 @@ class MarketSimulator:
             workers = multiprocess.Pool(num_workers)
             # results = workers.map(_run_backtest, policies)
             worker_iter = [[policies[i], i] for i in range(num_workers)]
+            # starmap iterates over "pre-zipped" tuples
             results = workers.starmap(_run_backtest, worker_iter)
-            # results = tqdm(
-            #     workers.imap_unordered(_run_backtest, policies),
-            #     total=num_workers,
-            # )
             workers.close()
             return results
         else:

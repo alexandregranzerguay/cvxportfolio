@@ -96,14 +96,20 @@ class SimulationResult:
         return pd.Series(data=data).to_string(float_format="{:,.3f}".format)
 
     def log_data(self, name, t, entry):
-        try:
-            getattr(self, name).loc[t] = entry
-        except AttributeError:
-            setattr(
-                self,
-                name,
-                (pd.Series if np.isscalar(entry) else pd.DataFrame)(index=[t], data=[entry]),
-            )
+        if isinstance(t, tuple):
+            try:
+                getattr(self, name).loc[t, :] = entry
+            except AttributeError:
+                setattr(self, name, pd.DataFrame(index=pd.MultiIndex.from_tuples([t]), data=[entry]))
+        else:
+            try:
+                getattr(self, name).loc[t] = entry
+            except AttributeError:
+                setattr(
+                    self,
+                    name,
+                    (pd.Series if np.isscalar(entry) else pd.DataFrame)(index=[t], data=[entry]),
+                )
 
     def log_policy(self, t, exec_time):
         self.log_data("policy_time", t, exec_time)
