@@ -985,6 +985,7 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
         self.lookahead_periods = lookahead_periods
         self.trading_times = trading_times
         self.terminal_weights = terminal_weights
+        self.estimated_index_w = True
         super().__init__(*args, **kwargs)
 
     def get_trades(self, portfolio, t=dt.datetime.today()):
@@ -1033,15 +1034,22 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
         prob_arr = []
         z_vars = []
         w_vars = []
+        rng = np.random.default_rng()
 
         for i, tau in enumerate(tau_times):
+            if tau != t and self.estimated_index_w:
+                w_index = np.abs(self.w_index + rng.normal(0, 1, self.w_index.shape))
+                w_index = w_index / np.sum(w_index)
+            else:
+                w_index = self.w_index
             z = cvx.Variable(w_init.size)
             wplus = w_init + z
 
             # Objective Function
-            ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(
-                t, tau, wplus=wplus, w_index=self.w_index
-            )
+            # ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(
+            #     t, tau, wplus=wplus, w_index=self.w_index
+            # )
+            ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus=wplus, w_index=w_index)
 
             # l1 penalty term
             ret += mu * cvx.norm(wplus - y[i], 1)
