@@ -16,6 +16,7 @@ limitations under the License.
 
 import datetime as dt
 import logging
+from operator import index
 import sys
 
 # import numdifftools as nd
@@ -490,15 +491,13 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
     def __init__(
         self,
         return_forecast,
-        # returns_index,
-        # index_weights,
-        # Q,
-        # TE,
         index_prices,
         float_shares,
         costs,
         constraints,
-        gamma_excess,
+        gamma_te,
+        Sigma,
+        index_weights=None,
         solver=None,
         solver_opts=None,
         index_value=None,
@@ -511,7 +510,9 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         self.index_prices = index_prices
         self.index_value = index_value
         self.float_shares = float_shares
-        self.gamma_excess = gamma_excess
+        self.index_weights = index_weights
+        self.gamma_te = gamma_te
+        self.Sigma = Sigma
         # self.returns_index = returns_index
         # self.index_weights = index_weights
         # self.TE = TE
@@ -554,27 +555,15 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         z = cvx.Variable(w.size)  # TODO pass index
         wplus = w + z
         w_index = self._get_index_weights(t)
-        self.w_index = w_index
+        self.w_index = w_index.copy()
 
         if isinstance(self.return_forecast, BaseReturnsModel):
-            # diff = cvx.norm(
-            #     self.returns_index.weight_expr(t)
-            #     - self.return_forecast.weight_expr(t, wplus),
-            #     2,
-            # )
-            # tracking_term = cvx.huber(diff, 0.1)
-            # tracking_term = diff
-            ret = self.gamma_excess * self.return_forecast.weight_expr(t, wplus=wplus, w_index=w_index)
-        else:
-            # TODO: Properly implement this if I want
-            # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
-            # tracking_term = cvx.sum(cvx.multiply(
-            #     values_in_time(self.return_forecast, t).values,
-            #     wplus))
-            logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
+            #  max mu^T @ (w - w_index)
+            # ret = self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus, w_index)
+            ret = self.gamma_te * cvx.quad_form((wplus - w_index), values_in_time(self.Sigma, t))
 
-        # assert tracking_term.is_convex()
         assert ret.is_convex()
+        # assert tracking_term.is_convex()
 
         costs, constraints = [], []
 
@@ -595,8 +584,7 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         for el in constraints:
             assert el.is_dcp()
 
-        # obj = cvx.Minimize(tracking_term + sum(costs))
-        obj = cvx.Minimize(-ret + sum(costs))
+        obj = cvx.Minimize(ret + sum(costs))
         self.prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
@@ -614,10 +602,25 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
             return self._nulltrade(portfolio)
 
     def _get_index_weights(self, t):
-        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
-        index_weights = market_cap / market_cap.sum()
-        index_weights["Cash"] = 0
-        return index_weights
+        if self.index_weights is not None:
+            try:
+                index_weights = self.index_weights.loc[t]
+                index_weights["Cash"] = 0
+                return index_weights
+            except:
+                idx = self.index_weights.index.get_loc(t, method="pad")
+                index_weights = self.index_weights.iloc[idx]
+                t = index_weights.sum()
+                index_weights["Cash"] = 0
+                return index_weights
+        else:
+            idx = self.float_shares.index.get_loc(t, method="pad")
+            market_cap = self.float_shares.iloc[idx].multiply(values_in_time(self.index_prices, t)).fillna(0)
+            if market_cap.ndim > 1:
+                raise KeyError(f"Missing index data at {t}")
+            index_weights = market_cap / market_cap.sum()
+            index_weights["Cash"] = 0
+            return index_weights
 
 
 class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
@@ -634,83 +637,48 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
         self.lookahead_periods = lookahead_periods
         self.trading_times = trading_times
         self.terminal_weights = terminal_weights
+        self.estimated_index_w = False
         super(QuadTrackingMultiPeriodOpt, self).__init__(*args, **kwargs)
-
-    # TODO: Check if general function is better
-    # def add_robust(self, box:bool=False, elipsoidal:bool=False, *args, **kwargs):
-    #     if box:
-    #         # check presence of necesary args
-    #         kwords = ["ret_hat", "lambda_robust"]
-    #         for el in kwords:
-    #             if el not in kwargs:
-    #                 print(f"Missing argument {el}")
-
-    def add_robust(self, sigma, gamma):
-        self.sigma = sigma
-        self.gamma_robust = gamma
 
     def get_trades(self, portfolio, t=dt.datetime.today()):
 
         value = sum(portfolio)
         assert value > 0.0
         w = cvx.Constant(portfolio.values / value)
-        w_index = self._get_index_weights(t)
-        self.w_index = w_index  # used for reporting
+        try:
+            w_index = self._get_index_weights(t)
+        except:
+            return self._nulltrade(portfolio)
 
         prob_arr = []
         z_vars = []
 
+        rng = np.random.default_rng()
+
         # for con in self.constraints:
         #     if isinstance(con, IndexUpdater) and hasattr(con, "is_initiated"):
         #         con._update_required(t)
-
+        index_track = list()
+        w_arr = list()
         # planning_periods = self.lookahead_model.get_periods(t)
         for tau in self.trading_times[
             self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
         ]:
-            # delta_t in [pd.Timedelta('%d days' % i) for i in
-            # range(self.lookahead_periods)]:
-            #            tau = t + delta_t
+            if tau != t and self.estimated_index_w:
+                w_index[:-1] = np.abs(w_index[:-1] + rng.normal(0, 0.01, w_index[:-1].shape))
+                w_index = w_index / np.sum(w_index)
+            else:
+                w_index = self._get_index_weights(tau)
+            index_track.append(w_index.copy())
             z = cvx.Variable(*w.shape)
             wplus = w + z
 
             if isinstance(self.return_forecast, BaseReturnsModel):
-                # diff = cvx.norm(
-                #     self.returns_index.weight_expr(t)
-                #     - self.return_forecast.weight_expr_ahead(t, tau, wplus),
-                #     2,
-                # )
-
                 #  max mu^T @ (w - w_index)
-                ret = self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus, w_index)
-                # tracking_term = cvx.huber(diff, 0.1)
-                # tracking_term = self.gamma_excess * diff
-                # tracking_error = (wplus - self.index_weights) @ self.Q.weight_expr_ahead(t, tau) @ (wplus - self.index_weights)
-            else:
-                # TODO: Properly implement this if I want
-                # diff = self.returns_index[t] - cvx.multiply(self.return_forecast[t], wplus)
-                # tracking_term = cvx.sum(cvx.multiply(
-                #     values_in_time(self.return_forecast, t).values,
-                #     wplus))
-                logging.warning("Not implemented see TrackingSinglePeriodOpt.get_trades()")
+                # ret = self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus, w_index)
+                ret = self.gamma_te * cvx.quad_form((wplus - w_index), values_in_time(self.Sigma, t))
 
-            if hasattr(self, "gamma_robust"):
-                # Required portfolio robustness
-                var_matr = np.diag(np.diag(values_in_time(self.sigma, tau)))
-                # # Target portfolio return estimation error (r.e.e. bound)
-                # # rob_bnd = np.dot(w0, np.dot(var_matr, w0))
-                # np.dot(w0, np.dot(var_matr, w0))
-                # var_minVar = np.dot(w_minVar, np.dot(Q, w_minVar))
-                # ret_minVar = np.dot(mu, w_minVar)
-                # rob_minVar = np.dot(w_minVar, np.dot(var_matr, w_minVar))
-
-                # Portf_Retn = np.dot(mu, w1.value)  # Estimated returns from minVar
-                # Portf_Retn = ret_minVar * 10
-                # Qq_rMV = var_matr
-                temp = self.gamma_robust * cvx.quad_form(wplus, var_matr)
-                ret = ret - temp
-            else:
-                assert ret.is_convex()
+            assert ret.is_convex()
             # assert tracking_term.is_convex()
 
             costs, constraints = [], []
@@ -732,21 +700,13 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
             for el in constraints:
                 assert el.is_dcp()
 
-            # obj = cvx.Minimize(tracking_term + sum(costs))
-            obj = cvx.Minimize(-ret + sum(costs))
+            obj = cvx.Minimize(ret + sum(costs))
             prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
             prob_arr.append(prob)
             z_vars.append(z)
+            w_arr.append(wplus)
             w = wplus
 
-            # Using this for troubleshooting/logging
-            # self.index_obj = self.returns_index.weight_expr(t)
-            # self.portfolio_obj = self.return_forecast.weight_expr_ahead(t, tau, wplus)
-            # self.diff_obj = tracking_term
-            # try:
-            #     self.te = costs[2].args[1]
-            # except:
-            #     self.te = constraints[2].args[0]
         # Terminal constraint.
         if self.terminal_weights is not None:
             prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
@@ -755,6 +715,9 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
         self.prob = sum(prob_arr)
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
+            # temp3 = self.index_weights.loc[t]
+            # temp2 = np.abs(index_track[0] - self.index_weights.loc[t])
+            temp = np.abs(self.optToArr(w_arr) - index_track)
             if self.prob.status == "unbounded":
                 logging.error("The problem is unbounded. Defaulting to no trades")
                 return self._nulltrade(portfolio)
@@ -772,6 +735,12 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
             logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
             return self._nulltrade(portfolio)
 
+    def optToArr(self, l):
+        arr_l = list()
+        for el in l:
+            arr_l.append(el.value)
+        return np.array(arr_l)
+
 
 class CardinalitySPO(BasePolicy):
     def __init__(
@@ -783,6 +752,9 @@ class CardinalitySPO(BasePolicy):
         constraints,
         gamma_excess,
         card,
+        Sigma,
+        index_weights=None,
+        gamma_te=1,
         thresh=1e-5,
         max_iter=10,
         solver=None,
@@ -798,9 +770,12 @@ class CardinalitySPO(BasePolicy):
         self.index_value = index_value
         self.float_shares = float_shares
         self.gamma_excess = gamma_excess
+        self.index_weights = index_weights
         self.card = card
         self.THRESH = thresh
         self.MAX_ITER = max_iter
+        self.gamma_te = gamma_te
+        self.Sigma = Sigma
         super().__init__()
 
         for cost in costs:
@@ -852,10 +827,31 @@ class CardinalitySPO(BasePolicy):
         return NotImplemented
 
     def _get_index_weights(self, t):
-        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
-        index_weights = market_cap / market_cap.sum()
-        index_weights["Cash"] = 0
-        return index_weights
+        if self.index_weights is not None:
+            try:
+                index_weights = self.index_weights.loc[t]
+                index_weights["Cash"] = 0
+                return index_weights
+            except:
+                idx = self.index_weights.index.get_loc(t, method="pad")
+                index_weights = self.index_weights.iloc[idx]
+                t = index_weights.sum()
+                index_weights["Cash"] = 0
+                return index_weights
+        else:
+            idx = self.float_shares.index.get_loc(t, method="pad")
+            market_cap = self.float_shares.iloc[idx].multiply(values_in_time(self.index_prices, t)).fillna(0)
+            if market_cap.ndim > 1:
+                raise KeyError(f"Missing index data at {t}")
+            index_weights = market_cap / market_cap.sum()
+            index_weights["Cash"] = 0
+            return index_weights
+
+    # def _get_index_weights(self, t):
+    #     market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
+    #     index_weights = market_cap / market_cap.sum()
+    #     index_weights["Cash"] = 0
+    #     return index_weights
 
     def _rand_gen(self, size: tuple):
         # generator
@@ -918,13 +914,14 @@ class PADMCardinalitySPO(CardinalitySPO):
 
     def f(self, y, mu, t):
         z = cvx.Variable(self.w.size)
-        w_next = self.w + z
+        wplus = self.w + z
 
         # Objective Function
-        ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
+        # ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
+        ret = self.gamma_te * cvx.quad_form((wplus - self.w_index), values_in_time(self.Sigma, t))
 
         # l1 penalty term
-        ret += mu * cvx.norm(w_next - y, 1)
+        ret += mu * cvx.norm(wplus - y, 1)
 
         # assert tracking_term.is_convex()
         assert ret.is_convex()
@@ -933,11 +930,11 @@ class PADMCardinalitySPO(CardinalitySPO):
         costs, constraints = [], []
 
         for cost in self.costs:
-            cost_expr, const_expr = cost.weight_expr(t, w_next, z, self.value)
+            cost_expr, const_expr = cost.weight_expr(t, wplus, z, self.value)
             costs.append(cost_expr)
             constraints += const_expr
 
-        for item in (con.weight_expr(t, w_next, z, self.value) for con in self.constraints):
+        for item in (con.weight_expr(t, wplus, z, self.value) for con in self.constraints):
             if isinstance(item, list):
                 constraints += item
             else:
@@ -960,7 +957,7 @@ class PADMCardinalitySPO(CardinalitySPO):
             if prob.status == "infeasible":
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(self.portfolio)
-            return w_next.value
+            return wplus.value
         except Exception as e:
             print(e)
             print("Error solving f() part of the problem")
@@ -1049,7 +1046,9 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
             # ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(
             #     t, tau, wplus=wplus, w_index=self.w_index
             # )
-            ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus=wplus, w_index=w_index)
+
+            # ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus=wplus, w_index=w_index)
+            ret = self.gamma_te * cvx.quad_form((wplus - w_index), values_in_time(self.Sigma, t))
 
             # l1 penalty term
             ret += mu * cvx.norm(wplus - y[i], 1)

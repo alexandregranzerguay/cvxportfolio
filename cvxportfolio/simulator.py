@@ -129,6 +129,8 @@ class MarketSimulator:
             if t in rebalance_on:
                 logging.info("Getting trades at time %s" % t)
                 start = time.time()
+                # if t == datetime.strptime("2015-05-18", "%Y-%m-%d"):
+                #     print("check time")
                 try:
                     u = policy.get_trades(h, t)
                 except Exception as e:
@@ -137,13 +139,26 @@ class MarketSimulator:
                     u = pd.Series(index=h.index, data=0.0)
                 end = time.time()
                 results.log_policy(t, end - start)
+                # if "index_weights" in policy.__dict__:
+                #     try:
+                #         results.log_data("w_index", t, policy.index_weights.loc[t])
+                #         self.w_index_hold = policy.index_weights.loc[t]
+                #     except:
+                #         idx = policy.index_weights.index.get_loc(t, method="pad")
+                #         results.log_data("w_index", t, policy.index_weights.iloc[idx])
+                #         self.w_index_hold = policy.index_weights.iloc[idx]
+
             else:
                 logging.info(f"{t} is not a rebalancing date")
                 u = pd.Series(index=h.index, data=0.0)
+                # results.log_data("w_index", t, self.w_index_hold)
 
             # diffs[t] = diff.value
             # print(self.cash_key in u.index)
             # print(self.cash_key in h.index)
+            if "index_weights" in policy.__dict__:
+                idx = policy.index_weights.index.get_loc(t, method="pad")
+                results.log_data("w_index", t, policy.index_weights.iloc[idx])
 
             assert not pd.isnull(u).any()
             logging.info("Propagating portfolio at time %s" % t)
@@ -165,7 +180,7 @@ class MarketSimulator:
                 results.log_data("te", t, policy.te)
             except:
                 results.log_data("te", t, 0)
-            results.log_data("w_index", t, policy.w_index)
+
             results.log_data("market_returns", t, self.market_returns.loc[t])
         # pd_diff = pd.DataFrame(diffs)
         # pd_diff.to_csv("diffs.csv")

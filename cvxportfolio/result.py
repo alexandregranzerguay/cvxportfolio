@@ -251,5 +251,7 @@ class SimulationResult:
 
     @property
     def index_returns(self):
-        index_ret = np.sum(self.w_index * self.market_returns, axis="columns")
-        return index_ret.add(1, fill_value=0).cumprod() * self.v.iloc[0]
+        index_ret = np.sum(self.w_index * self.market_returns, axis="columns").shift(1)
+        index_ret.iloc[0] = 0
+        # return index_ret.add(1, fill_value=0).cumprod() * self.v.iloc[0]
+        return self.v.iloc[0] * (1 + index_ret).cumprod()
