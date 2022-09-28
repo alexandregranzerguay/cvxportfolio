@@ -75,7 +75,17 @@ class BasePolicy(object, metaclass=ABCMeta):
 
     def get_rounded_trades(self, portfolio, prices, t):
         """Get trades vector as number of shares, rounded to integers."""
-        return np.round(self.get_trades(portfolio, t) / values_in_time(prices, t))[:-1]
+        # trades = self.get_trades(portfolio, t)
+        # temp2 = values_in_time(prices, t)[trades.index[:-1]]
+        # trades[:-1] = np.round(trades[:-1] / values_in_time(prices, t)[trades.index[:-1]]).fillna(0)
+        # # cash = portfolio[-1] + round_trades @ values_in_time(prices, t)
+        # # return np.concatenate((round_trades, cash))
+        # return trades
+        trades = self.get_trades(portfolio, t)
+        # Using floor for now for simplicity but this is sub-optimal obviously
+        trades[:-1] = np.floor(trades[:-1] / values_in_time(prices, t)[trades.index[:-1]]).fillna(0)
+        trades[:-1] = np.multiply(trades[:-1], values_in_time(prices, t)[trades.index[:-1]])
+        return trades
 
 
 class Hold(BasePolicy):

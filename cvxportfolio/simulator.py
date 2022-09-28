@@ -32,6 +32,8 @@ from .returns import MultipleReturnsForecasts
 from .result import SimulationResult
 from .costs import BaseCost
 
+from .utils import null_checker, values_in_time
+
 # TODO update benchmark weights (?)
 # Also could try jitting with numba.
 
@@ -39,14 +41,14 @@ from .costs import BaseCost
 class MarketSimulator:
     logger = None
 
-    def __init__(self, market_returns, costs, market_volumes=None, cash_key="cash"):
+    def __init__(self, market_returns, costs, market_volumes=None, prices=None, cash_key="cash"):
         """Provide market returns object and cost objects."""
         self.market_returns = market_returns
         if market_volumes is not None:
             self.market_volumes = market_volumes[market_volumes.columns.difference([cash_key])]
         else:
             self.market_volumes = None
-
+        self.prices = prices
         self.costs = costs
         for cost in self.costs:
             assert isinstance(cost, BaseCost)
@@ -80,6 +82,11 @@ class MarketSimulator:
             assert not pd.isnull(cost)
             assert not np.isinf(cost)
 
+        # if self.prices is not None:
+        #     traded_value = u[u.index != self.cash_key] @ values_in_time(self.prices, t)[u.index[:-1]]
+        #     u[self.cash_key] = -traded_value - sum(costs)
+        # else:
+        #     u[self.cash_key] = -sum(u[u.index != self.cash_key]) - sum(costs)
         u[self.cash_key] = -sum(u[u.index != self.cash_key]) - sum(costs)
         hplus[self.cash_key] = h[self.cash_key] + u[self.cash_key]
 
@@ -132,7 +139,10 @@ class MarketSimulator:
                 # if t == datetime.strptime("2015-05-18", "%Y-%m-%d"):
                 #     print("check time")
                 try:
-                    u = policy.get_trades(h, t)
+                    if self.prices is not None:
+                        u = policy.get_rounded_trades(h, self.prices, t)
+                    else:
+                        u = policy.get_trades(h, t)
                 except Exception as e:
                     logging.warning("Solver failed on timestamp %s. Default to no trades." % t)
                     print(e)
@@ -182,6 +192,8 @@ class MarketSimulator:
                 results.log_data("te", t, 0)
 
             results.log_data("market_returns", t, self.market_returns.loc[t])
+            # if self.prices is not None:
+            #     results.log_data("prices", t, self.prices.loc[t])
         # pd_diff = pd.DataFrame(diffs)
         # pd_diff.to_csv("diffs.csv")
         logging.info("Backtest ended, from %s to %s" % (simulation_times[0], simulation_times[-1]))
@@ -299,3 +311,101 @@ class MarketSimulator:
         data["RMS error"] = np.asarray(cvx.norm(Wmat @ Pmat - Rmat, 2, axis=0).value).ravel()
         data["RMS error"] /= np.sqrt(num_sources)
         return data
+
+    def rebalance(self, x_init, cash_init, w_opt, cur_prices, turnover=1, interest=0):
+        """MIP
+        This method returns the optimal transactions based on available cash
+        TODO: Adapt this to work with Simulator Object
+
+        x_delta: amount traded without tx costs and integer constraints
+        x_delta_opt: absolute amount traded after transaction costs and integer contraints
+        tx_cost: tx costs associated with x_delta_opt
+        x_opt_int: optimal positions based on x_init + sign_x_delta * x_delta_opt
+        sign_x_delta: signs of trades, positive when buying, negative when selling
+        """
+        n = len(x_init)
+        w_opt = np.array(w_opt)
+
+        # Portfolio value
+        Vp = np.dot(x_init, cur_prices) + cash_init
+
+        # ideal positions with no consideration for constraints
+        try:
+            x_opt = Vp * w_opt / cur_prices
+        except:
+            print("No solution existed - returned initial portfolio")
+            return x_init, cash_init, 0
+
+        # Check that all positions are non-negative (no shorting)
+        if not all(i >= 0 for i in x_opt):
+            raise ValueError
+
+        x_delta = x_opt - x_init  # if positive -> buy, if negative -> sell
+        abs_x_delta = np.abs(
+            x_delta
+        )  # ideal amount transacted in an absolute sense (without tx costs and integer consideration)
+
+        sign_x_delta = x_delta / abs_x_delta  # used to track the signs of the original transaction directions
+
+        # Optimization
+        cpx = cplex.Cplex()
+        cpx.objective.set_sense(cpx.objective.sense.minimize)
+
+        var_names = [f"x{i}" for i in range(n)] + [f"x_d{i}" for i in range(n)] + [f"x_t{i}" for i in range(n)] + ["c"]
+        a = 1  # Used to reduce or increase penalty on holding cash
+        c = [-1] * n + [0] * n + [0] * n + [a]  # Vector of ones for each x_delta and 0's for transaction costs
+        # TODO: Think about building a A matrix creator
+        A = []
+        for i in range(n):
+            A.append(
+                [
+                    [i, n, n + 1 + i],
+                    [1.0, sign_x_delta[i] * cur_prices[i], -1 * 0.005 * cur_prices[i]],
+                ]
+            )
+        for i in range(n):
+            A.append([[i], [1.0]])
+        for i in range(n):
+            A.append(
+                [
+                    [n, n + 1 + i],
+                    [1.0, 1.0],
+                ]
+            )
+        # Cash constraints
+        A.append([[n, 2 * n + 1], [1.0, 1.0]])
+
+        zeros = [0] * n
+        # NOTE: cash_init - interest ensures that the opt cash > interest amount
+        rhs = (turnover * abs_x_delta).tolist() + [cash_init - interest] + zeros + [interest]
+        senses = "E" * (2 * n + 1) + "G"
+
+        cpx.linear_constraints.add(rhs=rhs, senses=senses)
+        cpx.variables.add(
+            obj=c,
+            columns=A,
+            names=var_names,
+            types=[cpx.variables.type.integer] * 20 + [cpx.variables.type.continuous] * 41,
+        )
+
+        cpx.set_results_stream(None)
+        cpx.set_log_stream(None)
+        cpx.solve()
+
+        # Results
+        val_star = np.array(cpx.solution.get_values())
+
+        x_delta_opt = np.array(val_star[:20])
+        x_opt_int = x_init + sign_x_delta * x_delta_opt
+        tx_opt = np.array(val_star[40:60])
+        cash_opt = val_star[-1]
+
+        # If any position got shorted in the optimization problem, simply remove the shorted assets.
+        # Remove from cash amount associated with shorted assets
+        # Add to cash the amount associated with transaction costs of shorted assets.
+        # NOTE:This is slightly naive but wanted to have simple solution here
+        for i in range(n):
+            if x_opt_int[i] < 0:
+                cash_opt += np.abs(x_opt_int[i]) * cur_prices[i] * (0.005 - 1)
+                x_opt_int[i] = 0
+        return x_opt_int, cash_opt, tx_opt
