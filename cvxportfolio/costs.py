@@ -47,6 +47,22 @@ class BaseCost(Expression):
         return self.__mul__(other)
 
 
+class FilterAssets:
+    def __init__(self, asset_filter=True):
+        self.asset_filter = asset_filter
+
+    def filter(self, assets):
+        # Returning self, allows for method chaining
+        if not self.asset_filter:
+            return self
+        if not "assets" in self.__dict__:
+            raise ValueError(
+                "asset filtering not implemented, feature can be turned off by setting asset_filter = False"
+            )
+        self.assets = assets
+        return self
+
+
 class HcostModel(BaseCost):
     """A model for holding costs.
 
@@ -126,7 +142,7 @@ class TcostModel(BaseCost):
     def __init__(self, half_spread, nonlin_coeff=0.0, sigma=0.0, volume=1.0, power=1.5):
         null_checker(half_spread)
         self.half_spread = half_spread
-        null_checker(sigma)
+        # null_checker(sigma)
         self.sigma = sigma
         null_checker(volume)
         self.volume = volume

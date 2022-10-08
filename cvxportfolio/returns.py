@@ -33,7 +33,23 @@ class BaseReturnsModel(Expression):
     pass
 
 
-class BlackLittermanModel(BaseReturnsModel):
+class FilterAssets:
+    def __init__(self, asset_filter=True):
+        self.asset_filter = asset_filter
+
+    def filter(self, assets):
+        # Returning self, allows for method chaining
+        if not self.asset_filter:
+            return self
+        if not "assets" in self.__dict__:
+            raise ValueError(
+                "asset filtering not implemented, feature can be turned off by setting asset_filter = False"
+            )
+        self.assets = assets
+        return self
+
+
+class BlackLittermanModel(BaseReturnsModel, FilterAssets):
     def __init__(self, covariance_matrix=None, rf_rate=None, **kwargs):
         self.covariance_matrix = covariance_matrix
         self.rf_rate = rf_rate
@@ -66,6 +82,10 @@ class BlackLittermanModel(BaseReturnsModel):
         # index = returns.name
         cov = values_in_time(self.covariance_matrix, t)
 
+        # Filter covariance matrix:
+        idx = cov.columns.get_indexer(self.assets)
+        cov = cov.loc[:, self.assets].iloc[idx]
+
         # Calculate portfolio historical return and variance
         mean, var = self.port_mean_var(weights, returns, cov)
 
@@ -93,6 +113,7 @@ class ReturnsForecast(BlackLittermanModel):
         self.delta = delta
         self.gamma_decay = gamma_decay
         self.name = name
+        self.assets = returns.columns
         super().__init__(**kwargs)
 
     def weight_expr(self, t, wplus=None, z=None, v=None, w_index=None):
@@ -106,15 +127,17 @@ class ReturnsForecast(BlackLittermanModel):
         Returns:
           An expression for the alpha.
         """
+        returns = values_in_time(self.returns, t)[self.assets]
+
         if self.covariance_matrix is not None:
-            alpha = self.get_BL(values_in_time(self.returns, t), w_index, t)
+            alpha = self.get_BL(returns, w_index, t)
             return alpha @ (wplus - w_index)
         elif wplus is None:
-            alpha = values_in_time(self.returns, t)
+            alpha = returns
             # assert (isinstance(alpha, float))
             return alpha
         else:
-            alpha = cvx.multiply(values_in_time(self.returns, t), wplus)
+            alpha = cvx.multiply(returns, wplus)
             alpha -= cvx.multiply(values_in_time(self.delta, t), cvx.abs(wplus))
             return cvx.sum(alpha)
 

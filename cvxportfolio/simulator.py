@@ -67,6 +67,10 @@ class MarketSimulator:
             h_next: portfolio after returns propagation
             u: trades vector with simulated cash balance
         """
+        if h.index.size > u.index.size:
+            missing_idx = h.index.difference(u.index)
+            s = pd.Series(data=(0.0), index=missing_idx)
+            u = pd.concat([u, s])[h.index]
         assert u.index.equals(h.index)
 
         if self.market_volumes is not None:
@@ -77,9 +81,14 @@ class MarketSimulator:
                 u.loc[null_trades] = 0.0
 
         hplus = h + u
+        self.w_plus = hplus / hplus.sum()
+        hplus_old = hplus.copy()
         costs = [cost.value_expr(t, h_plus=hplus, u=u) for cost in self.costs]
         for cost in costs:
-            assert not pd.isnull(cost)
+            try:
+                assert not pd.isnull(cost)
+            except:
+                cost = 0.0
             assert not np.isinf(cost)
 
         # if self.prices is not None:
@@ -90,14 +99,15 @@ class MarketSimulator:
         u[self.cash_key] = -sum(u[u.index != self.cash_key]) - sum(costs)
         hplus[self.cash_key] = h[self.cash_key] + u[self.cash_key]
 
+        # print((hplus_old[:-1] != hplus[:-1]).any())
+        # print(hplus[self.cash_key])
+        # print(u[self.cash_key])
         # logging.info(hplus.index.sort_values())
         # logging.info(self.market_returns.columns.sort_values())
 
-        assert hplus.index.sort_values().equals(self.market_returns.columns.sort_values())
+        # assert hplus.index.sort_values().equals(self.market_returns.columns.sort_values())
         h_next = self.market_returns.loc[t] * hplus + hplus
 
-        # assert (not h_next.isnull().values.any())
-        # assert (not u.isnull().values.any())
         assert not h_next.isnull().values.all()
         assert not u.isnull().values.all()
         return h_next, u
@@ -127,49 +137,40 @@ class MarketSimulator:
 
         if rebalance_on is None:
             rebalance_on = simulation_times
-        # diffs = {}
+
         for t in tqdm(simulation_times, position=tqdm_pos):
-            # for t in simulation_times:
             # # Used for debugging
             # if t == datetime.strptime("2020-06-25", "%Y-%m-%d"):
             #     print("check time")
             if t in rebalance_on:
                 logging.info("Getting trades at time %s" % t)
                 start = time.time()
-                # if t == datetime.strptime("2015-05-18", "%Y-%m-%d"):
-                #     print("check time")
-                try:
-                    if self.prices is not None:
-                        u = policy.get_rounded_trades(h, self.prices, t)
-                    else:
-                        u = policy.get_trades(h, t)
-                except Exception as e:
-                    logging.warning("Solver failed on timestamp %s. Default to no trades." % t)
-                    print(e)
-                    u = pd.Series(index=h.index, data=0.0)
+                # try:
+                if self.prices is not None:
+                    u = policy.get_rounded_trades(h, self.prices, t)
+                else:
+                    u = policy.get_trades(h, t)
+                # except Exception as e:
+                #     logging.warning("Solver failed on timestamp %s. Default to no trades." % t)
+                #     print(e)
+                #     u = pd.Series(index=h.index, data=0.0)
                 end = time.time()
                 results.log_policy(t, end - start)
-                # if "index_weights" in policy.__dict__:
-                #     try:
-                #         results.log_data("w_index", t, policy.index_weights.loc[t])
-                #         self.w_index_hold = policy.index_weights.loc[t]
-                #     except:
-                #         idx = policy.index_weights.index.get_loc(t, method="pad")
-                #         results.log_data("w_index", t, policy.index_weights.iloc[idx])
-                #         self.w_index_hold = policy.index_weights.iloc[idx]
-
             else:
                 logging.info(f"{t} is not a rebalancing date")
                 u = pd.Series(index=h.index, data=0.0)
-                # results.log_data("w_index", t, self.w_index_hold)
 
-            # diffs[t] = diff.value
-            # print(self.cash_key in u.index)
-            # print(self.cash_key in h.index)
             if "index_weights" in policy.__dict__:
-                idx = policy.index_weights.index.get_loc(t, method="pad")
-                results.log_data("w_index", t, policy.index_weights.iloc[idx])
+                # idx = policy.index_weights.index.get_loc(t, method="pad")
+                # temp = policy.index_weights.iloc[idx]
+                # results.log_data("w_index", t, policy.index_weights.iloc[idx])
+                results.log_data("w_index", t, policy.index_weights.loc[t])
 
+            # Index returns are only monthly... so this won't work
+            # if "index_ret" in policy.__dict__:
+            # results.log_data("index_ret", t, policy.index_ret.loc[t])
+            # idx = policy.index_weights.index.get_loc(t, method="pad")
+            # results.log_data("w_index", t, policy.index_weights.iloc[idx])
             assert not pd.isnull(u).any()
             logging.info("Propagating portfolio at time %s" % t)
             start = time.time()
@@ -190,12 +191,10 @@ class MarketSimulator:
                 results.log_data("te", t, policy.te)
             except:
                 results.log_data("te", t, 0)
-
+            results.log_data("w_dist", t, np.abs(self.w_plus - policy.index_weights.loc[t]))
+            results.log_data("w_plus", t, self.w_plus)
             results.log_data("market_returns", t, self.market_returns.loc[t])
-            # if self.prices is not None:
-            #     results.log_data("prices", t, self.prices.loc[t])
-        # pd_diff = pd.DataFrame(diffs)
-        # pd_diff.to_csv("diffs.csv")
+
         logging.info("Backtest ended, from %s to %s" % (simulation_times[0], simulation_times[-1]))
         return results
 

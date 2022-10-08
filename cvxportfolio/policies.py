@@ -83,8 +83,10 @@ class BasePolicy(object, metaclass=ABCMeta):
         # return trades
         trades = self.get_trades(portfolio, t)
         # Using floor for now for simplicity but this is sub-optimal obviously
-        trades[:-1] = np.floor(trades[:-1] / values_in_time(prices, t)[trades.index[:-1]]).fillna(0)
-        trades[:-1] = np.multiply(trades[:-1], values_in_time(prices, t)[trades.index[:-1]])
+        price_t = values_in_time(prices, t)[trades.index[:-1]]
+        portion = np.floor(trades[:-1] / values_in_time(prices, t)[trades.index[:-1]])
+        trades[:-1] = np.floor(trades[:-1] / values_in_time(prices, t)[trades.index[:-1]]).fillna(0.0)
+        trades[:-1] = np.multiply(trades[:-1], values_in_time(prices, t)[trades.index[:-1]]).fillna(0.0)
         return trades
 
 
@@ -502,7 +504,7 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         self,
         return_forecast,
         index_prices,
-        float_shares,
+        # float_shares,
         costs,
         constraints,
         gamma_te,
@@ -519,7 +521,7 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         self.return_forecast = return_forecast
         self.index_prices = index_prices
         self.index_value = index_value
-        self.float_shares = float_shares
+        # self.float_shares = float_shares
         self.index_weights = index_weights
         self.gamma_te = gamma_te
         self.Sigma = Sigma
@@ -544,6 +546,13 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         self.solver = solver
         self.solver_opts = {} if solver_opts is None else solver_opts
 
+    def pre_filter(self, df, assets=None):
+        if assets is None:
+            df = df[df > 0]
+        if assets is not None:
+            df = df[assets]
+        return df
+
     def get_trades(self, portfolio, t=None):
         """
         Get optimal trade vector for given portfolio at time t.
@@ -558,19 +567,35 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
 
         if t is None:
             t = dt.datetime.today()
+        if portfolio.isna().any():
+            portfolio = portfolio.fillna(0.0)
 
-        value = sum(portfolio)
+        # Filter index benchmark portfolio
+        w_index = values_in_time(self.index_weights, t).pipe(self.pre_filter)
+        w_index["cash"] = 0
+        self.w_index = w_index.copy()
+        assets = w_index.index
+
+        # Run Optimization
+        portfolio = portfolio.pipe(self.pre_filter, assets)
+        value = portfolio.sum()
         assert value > 0.0
         w = cvx.Constant(portfolio.values / value)
         z = cvx.Variable(w.size)  # TODO pass index
         wplus = w + z
-        w_index = self._get_index_weights(t)
-        self.w_index = w_index.copy()
 
         if isinstance(self.return_forecast, BaseReturnsModel):
             #  max mu^T @ (w - w_index)
-            # ret = self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus, w_index)
-            ret = self.gamma_te * cvx.quad_form((wplus - w_index), values_in_time(self.Sigma, t))
+            # ret = -self.gamma_excess * self.return_forecast.filter(assets).weight_expr(t, wplus, w_index=w_index)
+            # temp = values_in_time(self.Sigma, t)
+
+            Sigma = values_in_time(self.Sigma, t)
+            idx = Sigma.columns.get_indexer(assets)
+            Sigma_filt = Sigma.loc[:, assets].iloc[idx]
+            # diag_sig = np.diag(Sigma_filt)
+            ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
+
+            # ret = self.gamma_te * cvx.norm(wplus - w_index, 2)
 
         assert ret.is_convex()
         # assert tracking_term.is_convex()
@@ -582,7 +607,7 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
             costs.append(cost_expr)
             constraints += const_expr
 
-        for item in (con.weight_expr(t, wplus, z, value) for con in self.constraints):
+        for item in (con.filter(assets).weight_expr(t, wplus, z, value) for con in self.constraints):
             if isinstance(item, list):
                 constraints += item
             else:
@@ -598,6 +623,13 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         self.prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
+            # print(
+            #     np.count_nonzero(wplus.value >= 1e-6) > w_index[w_index >= 1e-6].count(),
+            #     np.count_nonzero(wplus.value >= 1e-6),
+            #     w_index[w_index >= 1e-6].count(),
+            # )
+            # if np.count_nonzero(wplus.value >= 1e-6) > w_index[w_index >= 1e-6].count():
+            #     print("hold your horses")
             if self.prob.status == "unbounded":
                 logging.error("The problem is unbounded. Defaulting to no trades")
                 return self._nulltrade(portfolio)
@@ -606,31 +638,32 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(portfolio)
             return pd.Series(index=portfolio.index, data=(z.value * value))
+            # return pd.Series(index=portfolio.index, data=(w_index - w.value) * value)
         except (cvx.SolverError, TypeError) as e:
             logging.error(e)
             logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
             return self._nulltrade(portfolio)
 
-    def _get_index_weights(self, t):
-        if self.index_weights is not None:
-            try:
-                index_weights = self.index_weights.loc[t]
-                index_weights["Cash"] = 0
-                return index_weights
-            except:
-                idx = self.index_weights.index.get_loc(t, method="pad")
-                index_weights = self.index_weights.iloc[idx]
-                t = index_weights.sum()
-                index_weights["Cash"] = 0
-                return index_weights
-        else:
-            idx = self.float_shares.index.get_loc(t, method="pad")
-            market_cap = self.float_shares.iloc[idx].multiply(values_in_time(self.index_prices, t)).fillna(0)
-            if market_cap.ndim > 1:
-                raise KeyError(f"Missing index data at {t}")
-            index_weights = market_cap / market_cap.sum()
-            index_weights["Cash"] = 0
-            return index_weights
+    # def _get_index_weights(self, t):
+    #     if self.index_weights is not None:
+    #         try:
+    #             index_weights = self.index_weights.loc[t]
+    #             index_weights["Cash"] = 0
+    #             return index_weights
+    #         except:
+    #             idx = self.index_weights.index.get_loc(t, method="pad")
+    #             index_weights = self.index_weights.iloc[idx]
+    #             t = index_weights.sum()
+    #             index_weights["Cash"] = 0
+    #             return index_weights
+    #     else:
+    #         idx = self.float_shares.index.get_loc(t, method="pad")
+    #         market_cap = self.float_shares.iloc[idx].multiply(values_in_time(self.index_prices, t)).fillna(0)
+    #         if market_cap.ndim > 1:
+    #             raise KeyError(f"Missing index data at {t}")
+    #         index_weights = market_cap / market_cap.sum()
+    #         index_weights["Cash"] = 0
+    #         return index_weights
 
 
 class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
@@ -757,7 +790,7 @@ class CardinalitySPO(BasePolicy):
         self,
         return_forecast,
         index_prices,
-        float_shares,
+        # float_shares,
         costs,
         constraints,
         gamma_excess,
@@ -778,7 +811,7 @@ class CardinalitySPO(BasePolicy):
         self.return_forecast = return_forecast
         self.index_prices = index_prices
         self.index_value = index_value
-        self.float_shares = float_shares
+        # self.float_shares = float_shares
         self.gamma_excess = gamma_excess
         self.index_weights = index_weights
         self.card = card

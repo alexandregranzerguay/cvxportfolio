@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import copy
 from .policies import MultiPeriodOpt
+from .costs import TcostModel
 
 
 def getFiscalQuarter(dt):
@@ -116,7 +117,11 @@ class SimulationResult:
         # TODO mpo policy requires changes in the optimization_log methods
         if not isinstance(self.policy, MultiPeriodOpt):
             for cost in self.policy.costs:
-                self.log_data("policy_" + cost.__class__.__name__, t, cost.optimization_log(t))
+                if isinstance(cost, TcostModel):
+                    total_period_cost = cost.optimization_log(t).sum()
+                else:
+                    total_period_cost = cost.optimization_log(t)
+                self.log_data("policy_" + cost.__class__.__name__, t, total_period_cost)
 
     def log_simulation(self, t, u, h_next, risk_free_return, exec_time):
         self.log_data("simulation_time", t, exec_time)
@@ -251,7 +256,8 @@ class SimulationResult:
 
     @property
     def index_returns(self):
+        # using daily mc weights
         index_ret = np.sum(self.w_index * self.market_returns, axis="columns").shift(1)
         index_ret.iloc[0] = 0
-        # return index_ret.add(1, fill_value=0).cumprod() * self.v.iloc[0]
+
         return self.v.iloc[0] * (1 + index_ret).cumprod()

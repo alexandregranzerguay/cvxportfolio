@@ -64,6 +64,23 @@ class BaseConstraint(object):
         pass
 
 
+class FilterAssets:
+    def __init__(self, asset_filter=True, **kwargs):
+        self.asset_filter = asset_filter
+        super().__init__(**kwargs)
+
+    def filter(self, assets):
+        # Returning self, allows for method chaining
+        if not self.asset_filter:
+            return self
+        if not "assets" in self.__dict__:
+            raise ValueError(
+                "asset filtering not implemented, feature can be turned off by setting asset_filter = False"
+            )
+        self.assets = assets
+        return self
+
+
 class MaxTrade(BaseConstraint):
     """A limit on maximum trading size."""
 
@@ -84,11 +101,11 @@ class MaxTrade(BaseConstraint):
         return cvx.abs(z[:-1]) * v <= np.array(values_in_time(self.ADVs, t)) * self.max_fraction
 
 
-class LongOnly(BaseConstraint):
+class LongOnly(FilterAssets, BaseConstraint):
     """A long only constraint."""
 
     def __init__(self, **kwargs):
-        super(LongOnly, self).__init__(**kwargs)
+        super().__init__(asset_filter=False, **kwargs)
 
     def _weight_expr(self, t, w_plus, z, v):
         """Returns a list of holding constraints.
@@ -121,11 +138,11 @@ class LeverageLimit(BaseConstraint):
         return cvx.norm(w_plus[:-1], 1) <= values_in_time(self.limit, t)
 
 
-class LongCash(BaseConstraint):
+class LongCash(FilterAssets, BaseConstraint):
     """Requires that cash be non-negative."""
 
     def __init__(self, **kwargs):
-        super(LongCash, self).__init__(**kwargs)
+        super().__init__(asset_filter=False, **kwargs)
 
     def _weight_expr(self, t, w_plus, z, v):
         """Returns a list of holding constraints.
@@ -344,12 +361,13 @@ class IndexUpdater:
         return index_weights
 
 
-class TrackingErrorMax(IndexUpdater, BaseConstraint):
-    def __init__(self, Sigma, limit, float_shares, index_prices, use_updater=False, **kwargs):
+class TrackingErrorMax(FilterAssets, BaseConstraint):
+    def __init__(self, Sigma, limit, index_weights, **kwargs):
         self.Sigma = Sigma  # Sigma is either a matrix or a pd.Panel
         self.limit = limit
-        self.float_shares = float_shares
-        self.index_prices = index_prices
+        self.index_weights = index_weights
+        self.assets = Sigma.columns
+        # self.index_prices = index_prices
         try:
             assert not pd.isnull(Sigma).values.any()
         except AttributeError:
@@ -360,13 +378,19 @@ class TrackingErrorMax(IndexUpdater, BaseConstraint):
         #     self._init_updater(index_prices=index_prices, sigma=Sigma, **kwargs)
 
     def weight_expr(self, t, w_plus, z, value):
-        self.w_bench = self._get_index_weights(t)
+        # self.w_bench = self._get_index_weights(t)
+        self.w_bench = self.index_weights.loc[t]
+        self.w_bench["cash"] = 0
+        self.w_bench = self.w_bench[self.assets]
         self.expression = self._estimate(t, w_plus - self.w_bench, z, value)
         return self.expression <= values_in_time(self.limit, t)
 
     def _estimate(self, t, wplus, z, value):
+        Sigma = values_in_time(self.Sigma, t)
+        idx = Sigma.columns.get_indexer(self.assets)
+        Sigma = Sigma.loc[:, self.assets].iloc[idx]
         try:
-            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t))
+            self.expression = cvx.quad_form(wplus, Sigma)
         except TypeError:
-            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t).values)
+            self.expression = cvx.quad_form(wplus, Sigma.values)
         return self.expression
