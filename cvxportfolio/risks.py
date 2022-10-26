@@ -124,7 +124,23 @@ class BaseRiskModelConst(BaseConstraint):
             return np.NaN
 
 
-class FullSigma(BaseRiskModel):
+class FilterAssets:
+    def __init__(self, asset_filter=True, **kwargs):
+        self.asset_filter = asset_filter
+        super().__init__(**kwargs)
+
+    def filter(self, assets):
+        # Returning self, allows for method chaining
+        if not "asset_filter" in self.__dict__:
+            raise ValueError("asset filtering not properly inherited")
+        if not self.asset_filter:
+            return self
+        else:
+            self.assets = assets
+        return self
+
+
+class FullSigma(FilterAssets, BaseRiskModel):
     """Quadratic risk model with full covariance matrix.
 
     Args:
@@ -133,19 +149,24 @@ class FullSigma(BaseRiskModel):
 
     """
 
-    def __init__(self, Sigma, **kwargs):
+    def __init__(self, Sigma, conditioning=0, **kwargs):
         self.Sigma = Sigma  # Sigma is either a matrix or a pd.Panel
+        self.cond = conditioning
         try:
             assert not pd.isnull(Sigma).values.any()
         except AttributeError:
             assert not pd.isnull(Sigma).any()
-        super(FullSigma, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def _estimate(self, t, wplus, z, value):
+        Sigma = values_in_time(self.Sigma, t)
+        idx = Sigma.columns.get_indexer(self.assets)
+        Sigma = Sigma.loc[:, self.assets].iloc[idx]
+        Sigma = Sigma + self.cond * np.diag(np.ones(Sigma.shape[0]))
         try:
-            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t))
+            self.expression = cvx.quad_form(wplus, Sigma)
         except TypeError:
-            self.expression = cvx.quad_form(wplus, values_in_time(self.Sigma, t).values)
+            self.expression = cvx.quad_form(wplus, Sigma.values)
         return self.expression
 
 

@@ -34,26 +34,26 @@ class BaseReturnsModel(Expression):
 
 
 class FilterAssets:
-    def __init__(self, asset_filter=True):
+    def __init__(self, asset_filter=True, **kwargs):
         self.asset_filter = asset_filter
+        super().__init__(**kwargs)
 
     def filter(self, assets):
         # Returning self, allows for method chaining
+        if not "asset_filter" in self.__dict__:
+            raise ValueError("asset filtering not properly inherited")
         if not self.asset_filter:
             return self
-        if not "assets" in self.__dict__:
-            raise ValueError(
-                "asset filtering not implemented, feature can be turned off by setting asset_filter = False"
-            )
-        self.assets = assets
+        else:
+            self.assets = assets
         return self
 
 
-class BlackLittermanModel(BaseReturnsModel, FilterAssets):
+class BlackLittermanModel(FilterAssets, BaseReturnsModel):
     def __init__(self, covariance_matrix=None, rf_rate=None, **kwargs):
         self.covariance_matrix = covariance_matrix
         self.rf_rate = rf_rate
-        super().__init__(**kwargs)
+        super().__init__(asset_filter=True, **kwargs)
 
     # Calculates portfolio mean return
     def port_mean(self, W, R):
@@ -129,7 +129,7 @@ class ReturnsForecast(BlackLittermanModel):
         """
         returns = values_in_time(self.returns, t)[self.assets]
 
-        if self.covariance_matrix is not None:
+        if self.covariance_matrix is not None and w_index is not None:
             alpha = self.get_BL(returns, w_index, t)
             return alpha @ (wplus - w_index)
         elif wplus is None:
@@ -170,7 +170,7 @@ class MPOReturnsForecast(BlackLittermanModel):
         self.alpha_data = alpha_data
         super().__init__(**kwargs)
 
-    def weight_expr_ahead(self, t, tau, wplus, w_index=None):
+    def weight_expr_ahead(self, t, tau, wplus=None, w_index=None):
         """Returns the estimate at time t of alpha at time tau.
 
         Args:
@@ -181,13 +181,13 @@ class MPOReturnsForecast(BlackLittermanModel):
         Returns:
             An expression for the alpha.
         """
-        if self.covariance_matrix is not None:
-            alpha = self.get_BL(self.alpha_data[(t, tau)], w_index, t)
+        if self.covariance_matrix is not None and wplus is not None:
+            alpha = self.get_BL(self.alpha_data[(t, tau)][self.assets], w_index, t)
             return alpha @ (wplus - w_index)
         if w_index is None:
-            return self.alpha_data[(t, tau)].values.T @ wplus
+            return self.alpha_data[(t, tau)][self.assets]
         else:
-            return self.alpha_data[(t, tau)].values.T @ (wplus - w_index)
+            return self.alpha_data[(t, tau)][self.assets].values.T @ (wplus - w_index)
 
 
 class MultipleReturnsForecasts(BaseReturnsModel):

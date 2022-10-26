@@ -95,10 +95,12 @@ class MarketSimulator:
         #     traded_value = u[u.index != self.cash_key] @ values_in_time(self.prices, t)[u.index[:-1]]
         #     u[self.cash_key] = -traded_value - sum(costs)
         # else:
-        #     u[self.cash_key] = -sum(u[u.index != self.cash_key]) - sum(costs)
+
         u[self.cash_key] = -sum(u[u.index != self.cash_key]) - sum(costs)
         hplus[self.cash_key] = h[self.cash_key] + u[self.cash_key]
 
+        if hplus[self.cash_key] < 0:
+            print(f"negative cash: {hplus[self.cash_key]}")
         # print((hplus_old[:-1] != hplus[:-1]).any())
         # print(hplus[self.cash_key])
         # print(u[self.cash_key])
@@ -107,7 +109,6 @@ class MarketSimulator:
 
         # assert hplus.index.sort_values().equals(self.market_returns.columns.sort_values())
         h_next = self.market_returns.loc[t] * hplus + hplus
-
         assert not h_next.isnull().values.all()
         assert not u.isnull().values.all()
         return h_next, u
@@ -155,6 +156,9 @@ class MarketSimulator:
                 #     print(e)
                 #     u = pd.Series(index=h.index, data=0.0)
                 end = time.time()
+                # for cost in policy.costs:
+                #     if cost.expression.value is None:
+                #         print("now")
                 results.log_policy(t, end - start)
             else:
                 logging.info(f"{t} is not a rebalancing date")

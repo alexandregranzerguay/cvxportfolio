@@ -33,6 +33,7 @@ import pandas as pd
 
 from .constraints import BaseConstraint, IndexUpdater, TrackingErrorMax
 from .costs import BaseCost, TcostModel
+from .risks import BaseRiskModel
 from .returns import BaseReturnsModel
 from .utils import null_checker, values_in_time
 
@@ -46,8 +47,8 @@ __all__ = [
     "ProportionalTrade",
     "RankAndLongShort",
     "PosTrackingSinglePeriodOpt",
-    "QuadTrackingSinglePeriodOpt",
-    "QuadTrackingMultiPeriodOpt",
+    "QuadTrackingSPO",
+    "QuadTrackingMPO",
     "PADMCardinalitySPO",
     "ADMCardinalitySPO",
     "NCVXCardinalitySPO",
@@ -493,7 +494,7 @@ class PosTrackingSinglePeriodOpt(BasePolicy):
             return self._nulltrade(portfolio)
 
 
-class QuadTrackingSinglePeriodOpt(BasePolicy):
+class QuadTrackingSPO(BasePolicy):
     """Single-period optimization policy.
 
     Implements the model developed in chapter 4 of our paper
@@ -503,7 +504,6 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
     def __init__(
         self,
         return_forecast,
-        index_prices,
         # float_shares,
         costs,
         constraints,
@@ -519,7 +519,6 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         if not isinstance(return_forecast, BaseReturnsModel):
             null_checker(return_forecast)
         self.return_forecast = return_forecast
-        self.index_prices = index_prices
         self.index_value = index_value
         # self.float_shares = float_shares
         self.index_weights = index_weights
@@ -533,7 +532,7 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         # Add any other keyword args to the class dict
         self.__dict__.update(kwargs)
 
-        super(QuadTrackingSinglePeriodOpt, self).__init__()
+        super().__init__()
 
         for cost in costs:
             assert isinstance(cost, BaseCost)
@@ -553,7 +552,7 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
             df = df[assets]
         return df
 
-    def get_trades(self, portfolio, t=None):
+    def get_trades(self, portfolio, t=dt.datetime.today()):
         """
         Get optimal trade vector for given portfolio at time t.
 
@@ -565,8 +564,6 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
             Timestamp for the optimization.
         """
 
-        if t is None:
-            t = dt.datetime.today()
         if portfolio.isna().any():
             portfolio = portfolio.fillna(0.0)
 
@@ -576,7 +573,7 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         self.w_index = w_index.copy()
         assets = w_index.index
 
-        # Run Optimization
+        # Pre-Optimization
         portfolio = portfolio.pipe(self.pre_filter, assets)
         value = portfolio.sum()
         assert value > 0.0
@@ -584,18 +581,27 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
         z = cvx.Variable(w.size)  # TODO pass index
         wplus = w + z
 
-        if isinstance(self.return_forecast, BaseReturnsModel):
-            #  max mu^T @ (w - w_index)
-            # ret = -self.gamma_excess * self.return_forecast.filter(assets).weight_expr(t, wplus, w_index=w_index)
-            # temp = values_in_time(self.Sigma, t)
+        # if isinstance(self.return_forecast, BaseReturnsModel):
+        #  max mu^T @ (w - w_index)
+        # ret = -self.gamma_excess * self.return_forecast.filter(assets).weight_expr(t, wplus, w_index=w_index)
+        # temp = values_in_time(self.Sigma, t)
 
+        # Sigma = values_in_time(self.Sigma, t)
+        # idx = Sigma.columns.get_indexer(assets)
+        # Sigma_filt = Sigma.loc[:, assets].iloc[idx]
+        # diag_sig = np.diag(Sigma_filt)
+        # ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
+        # ret = self.gamma_te * self.Sigma.filter(assets).weight_expr(t, wplus - w_index, z, value)[0]
+
+        # ret = self.gamma_te * cvx.norm(wplus - w_index, 2)
+
+        if isinstance(self.Sigma, BaseRiskModel):
+            ret = self.gamma_te * self.Sigma.filter(assets).weight_expr(t, wplus - w_index, z, value)[0]
+        else:
             Sigma = values_in_time(self.Sigma, t)
             idx = Sigma.columns.get_indexer(assets)
             Sigma_filt = Sigma.loc[:, assets].iloc[idx]
-            # diag_sig = np.diag(Sigma_filt)
             ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
-
-            # ret = self.gamma_te * cvx.norm(wplus - w_index, 2)
 
         assert ret.is_convex()
         # assert tracking_term.is_convex()
@@ -637,8 +643,10 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
             if self.prob.status == "infeasible":
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(portfolio)
+            for cost in self.costs:
+                if cost.expression.value is None:
+                    print("now")
             return pd.Series(index=portfolio.index, data=(z.value * value))
-            # return pd.Series(index=portfolio.index, data=(w_index - w.value) * value)
         except (cvx.SolverError, TypeError) as e:
             logging.error(e)
             logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
@@ -666,7 +674,7 @@ class QuadTrackingSinglePeriodOpt(BasePolicy):
     #         return index_weights
 
 
-class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
+class QuadTrackingMPO(QuadTrackingSPO):
     def __init__(
         self, trading_times: list, terminal_weights: pd.DataFrame, lookahead_periods: int = None, *args, **kwargs
     ):
@@ -681,26 +689,30 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
         self.trading_times = trading_times
         self.terminal_weights = terminal_weights
         self.estimated_index_w = False
-        super(QuadTrackingMultiPeriodOpt, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def get_trades(self, portfolio, t=dt.datetime.today()):
 
-        value = sum(portfolio)
+        if portfolio.isna().any():
+            portfolio = portfolio.fillna(0.0)
+
+        # Filter index benchmark portfolio
+        w_index = values_in_time(self.index_weights, t).pipe(self.pre_filter)
+        w_index["cash"] = 0
+        self.w_index = w_index.copy()
+        assets = w_index.index
+
+        # Pre-Optimization
+        portfolio = portfolio.pipe(self.pre_filter, assets)
+        value = portfolio.sum()
         assert value > 0.0
         w = cvx.Constant(portfolio.values / value)
-        try:
-            w_index = self._get_index_weights(t)
-        except:
-            return self._nulltrade(portfolio)
 
         prob_arr = []
         z_vars = []
 
         rng = np.random.default_rng()
 
-        # for con in self.constraints:
-        #     if isinstance(con, IndexUpdater) and hasattr(con, "is_initiated"):
-        #         con._update_required(t)
         index_track = list()
         w_arr = list()
         # planning_periods = self.lookahead_model.get_periods(t)
@@ -710,16 +722,30 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
             if tau != t and self.estimated_index_w:
                 w_index[:-1] = np.abs(w_index[:-1] + rng.normal(0, 0.01, w_index[:-1].shape))
                 w_index = w_index / np.sum(w_index)
-            else:
-                w_index = self._get_index_weights(tau)
+            elif tau != t:
+                w_index += w_index.mul(self.return_forecast.filter(assets).weight_expr_ahead(t, tau))
+
             index_track.append(w_index.copy())
             z = cvx.Variable(*w.shape)
             wplus = w + z
 
-            if isinstance(self.return_forecast, BaseReturnsModel):
-                #  max mu^T @ (w - w_index)
-                # ret = self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus, w_index)
-                ret = self.gamma_te * cvx.quad_form((wplus - w_index), values_in_time(self.Sigma, t))
+            # if isinstance(self.return_forecast, BaseReturnsModel):
+            #  max mu^T @ (w - w_index)
+            # ret = self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus, w_index)
+            # Sigma = values_in_time(self.Sigma, t)
+            # Test that weight_expr_ahead works for Sigma
+            # ret = self.gamma_te * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
+            # idx = Sigma.columns.get_indexer(assets)
+            # Sigma_filt = Sigma.loc[:, assets].iloc[idx]
+            # ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
+
+            if isinstance(self.Sigma, BaseRiskModel):
+                ret = self.gamma_te * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
+            else:
+                Sigma = values_in_time(self.Sigma, t)
+                idx = Sigma.columns.get_indexer(assets)
+                Sigma_filt = Sigma.loc[:, assets].iloc[idx]
+                ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
 
             assert ret.is_convex()
             # assert tracking_term.is_convex()
@@ -774,6 +800,8 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
 
             return pd.Series(index=portfolio.index, data=(z_vars[0].value * value))
         except (cvx.SolverError, TypeError) as e:
+            # for cost in self.costs:
+            #     cost.expression.value = 0
             logging.error(e)
             logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
             return self._nulltrade(portfolio)
@@ -785,7 +813,7 @@ class QuadTrackingMultiPeriodOpt(QuadTrackingSinglePeriodOpt):
         return np.array(arr_l)
 
 
-class CardinalitySPO(BasePolicy):
+class Cardinality(BasePolicy):
     def __init__(
         self,
         return_forecast,
@@ -849,11 +877,18 @@ class CardinalitySPO(BasePolicy):
         if t is None:
             t = dt.datetime.today()
 
-        self.portfolio = portfolio
-        self.value = sum(self.portfolio)
+        # Filter index benchmark portfolio
+        w_index = values_in_time(self.index_weights, t).pipe(self.pre_filter)
+        w_index["cash"] = 0
+        self.w_index = w_index.copy()
+        self.assets = w_index.index
+
+        # Pre-Optimization
+        self.portfolio = portfolio.pipe(self.pre_filter, self.assets)
+        self.value = portfolio.sum()
         assert self.value > 0.0
-        self.w = cvx.Constant(self.portfolio.values / self.value)
-        self.w_index = self._get_index_weights(t)
+        self.w_init = cvx.Constant(self.portfolio.values / self.value)
+        # self.w_index = self._get_index_weights(t)
         if self.method == "PADM":
             z = self.PADM(t)
         elif self.method == "ADM":
@@ -861,7 +896,7 @@ class CardinalitySPO(BasePolicy):
         elif self.method == "NCVX":
             z = self.NCVX(t)
 
-        return pd.Series(index=portfolio.index, data=(z * self.value))
+        return pd.Series(index=self.portfolio.index, data=(z * self.value))
 
     def f():
         return NotImplemented
@@ -869,26 +904,33 @@ class CardinalitySPO(BasePolicy):
     def g():
         return NotImplemented
 
-    def _get_index_weights(self, t):
-        if self.index_weights is not None:
-            try:
-                index_weights = self.index_weights.loc[t]
-                index_weights["Cash"] = 0
-                return index_weights
-            except:
-                idx = self.index_weights.index.get_loc(t, method="pad")
-                index_weights = self.index_weights.iloc[idx]
-                t = index_weights.sum()
-                index_weights["Cash"] = 0
-                return index_weights
-        else:
-            idx = self.float_shares.index.get_loc(t, method="pad")
-            market_cap = self.float_shares.iloc[idx].multiply(values_in_time(self.index_prices, t)).fillna(0)
-            if market_cap.ndim > 1:
-                raise KeyError(f"Missing index data at {t}")
-            index_weights = market_cap / market_cap.sum()
-            index_weights["Cash"] = 0
-            return index_weights
+    def pre_filter(self, df, assets=None):
+        if assets is None:
+            df = df[df > 0]
+        if assets is not None:
+            df = df[assets]
+        return df
+
+    # def _get_index_weights(self, t):
+    #     if self.index_weights is not None:
+    #         try:
+    #             index_weights = self.index_weights.loc[t]
+    #             index_weights["Cash"] = 0
+    #             return index_weights
+    #         except:
+    #             idx = self.index_weights.index.get_loc(t, method="pad")
+    #             index_weights = self.index_weights.iloc[idx]
+    #             t = index_weights.sum()
+    #             index_weights["Cash"] = 0
+    #             return index_weights
+    #     else:
+    #         idx = self.float_shares.index.get_loc(t, method="pad")
+    #         market_cap = self.float_shares.iloc[idx].multiply(values_in_time(self.index_prices, t)).fillna(0)
+    #         if market_cap.ndim > 1:
+    #             raise KeyError(f"Missing index data at {t}")
+    #         index_weights = market_cap / market_cap.sum()
+    #         index_weights["Cash"] = 0
+    #         return index_weights
 
     # def _get_index_weights(self, t):
     #     market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
@@ -896,12 +938,15 @@ class CardinalitySPO(BasePolicy):
     #     index_weights["Cash"] = 0
     #     return index_weights
 
-    def _rand_gen(self, size: tuple):
+    def _rand_gen(self, shape: tuple):
         # generator
         rng = np.random.default_rng()
-        arr = rng.random(size)
+        arr = rng.random(shape)
         # Set the first (total - card) elements to 0
-        arr[: -self.card] = 0
+        if arr.ndim == 2:
+            arr[:, : -self.card] = 0
+        else:
+            arr[: -self.card] = 0
         # Normalize so it sums to 1
         arr = arr / arr.sum()
         # Shuffle vector around
@@ -916,7 +961,7 @@ class CardinalitySPO(BasePolicy):
         return np.linalg.norm((prev - curr), 2) ** 2
 
 
-class PADMCardinalitySPO(CardinalitySPO):
+class PADMCardinalitySPO(Cardinality):
     """This is a crude implementation of PADM - see PADM-Cardinality Constrained Portfolio[73]"""
 
     def __init__(self, mu=1e-4, **kwargs):
@@ -926,7 +971,7 @@ class PADMCardinalitySPO(CardinalitySPO):
 
     def PADM(self, t):
         # y_next = self.w
-        y_next = self._rand_gen(self.w.size)
+        y_next = self._rand_gen(self.w_init.size)
         iteration = 0
         mu = self.mu_start
         while True:
@@ -944,24 +989,31 @@ class PADMCardinalitySPO(CardinalitySPO):
                 diff_calc = np.abs(diff_last - diff)
                 # if self._distance(diff_last, diff) < self.THRESH:
                 if diff_calc < self.THRESH:
-                    z = y_next - self.w.value
+                    z = y_next - self.w_init.value
                     return z
 
                 if iteration >= self.MAX_ITER:
                     print("Max iter reached - not optimal!")
-                    z = y_next - self.w.value
+                    z = y_next - self.w_init.value
                     return z
 
             mu *= 10
             iteration += 1
 
     def f(self, y, mu, t):
-        z = cvx.Variable(self.w.size)
-        wplus = self.w + z
+        z = cvx.Variable(self.w_init.size)
+        wplus = self.w_init.copy() + z
 
         # Objective Function
         # ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
-        ret = self.gamma_te * cvx.quad_form((wplus - self.w_index), values_in_time(self.Sigma, t))
+        # ret = self.gamma_te * cvx.quad_form((wplus - self.w_index), values_in_time(self.Sigma, t))
+        if isinstance(self.Sigma, BaseRiskModel):
+            ret = self.gamma_te * self.Sigma.filter(self.assets).weight_expr(t, wplus - self.w_index, z, self.value)[0]
+        else:
+            Sigma = values_in_time(self.Sigma, t)
+            idx = Sigma.columns.get_indexer(self.assets)
+            Sigma_filt = Sigma.loc[:, self.assets].iloc[idx]
+            ret = self.gamma_te * cvx.quad_form((wplus - self.w_index), Sigma_filt)
 
         # l1 penalty term
         ret += mu * cvx.norm(wplus - y, 1)
@@ -1025,16 +1077,16 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
         self.lookahead_periods = lookahead_periods
         self.trading_times = trading_times
         self.terminal_weights = terminal_weights
-        self.estimated_index_w = True
+        self.estimated_index_w = False
         super().__init__(*args, **kwargs)
 
-    def get_trades(self, portfolio, t=dt.datetime.today()):
+    def PADM(self, t=dt.datetime.today()):
 
-        self.portfolio = portfolio
-        self.value = sum(self.portfolio)
-        self.w_index = self._get_index_weights(t)
-        assert self.value > 0.0
-        self.w = self.portfolio.values / self.value
+        # self.portfolio = portfolio
+        # self.value = sum(self.portfolio)
+        # self.w_index = self._get_index_weights(t)
+        # assert self.value > 0.0
+        # self.w = self.portfolio.values / self.value
 
         # planning_periods = self.lookahead_model.get_periods(t)
         tau_times = self.trading_times[
@@ -1043,10 +1095,14 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
 
         iteration = 0
         mu = self.mu_start
-        y = np.array([self.w] * 3)
+
+        # y generated based off current
+        # y = np.array([self.w_init] * len(tau_times))
+        # randomly generated y
+        y = self._rand_gen((len(tau_times), self.w_init.size))
         while True:
             # W incorporates return and TE and outter w_plus
-            w = self.f(self.w, y, mu, t, tau_times)
+            w = self.f(y, mu, t, tau_times)
             # y incorporates cardinality constraint
             y = self.g(w)
 
@@ -1058,32 +1114,39 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
                 diff = self._distance(w, y)
                 diff_calc = np.abs(diff_last - diff)
                 if diff_calc < self.THRESH:
-                    break
+                    z = y[0] - self.w_init.value
+                    return z
 
                 if iteration >= self.MAX_ITER:
                     logging.info("Max iter reached - not optimal!")
-                    break
+                    z = y[0] - self.w_init.value
+                    return z
 
             mu *= 10
             iteration += 1
 
-        z = y[0] - self.w
-        return pd.Series(index=portfolio.index, data=(z * self.value))
-
-    def f(self, w_init, y, mu, t, tau_times):
+    def f(self, y, mu, t, tau_times):
         prob_arr = []
         z_vars = []
         w_vars = []
         rng = np.random.default_rng()
+        w = self.w_init.copy()
 
         for i, tau in enumerate(tau_times):
             if tau != t and self.estimated_index_w:
-                w_index = np.abs(self.w_index + rng.normal(0, 1, self.w_index.shape))
+                w_index = self.w_index.copy()
+                w_index[:-1] = np.abs(w_index[:-1] + rng.normal(0, 0.01, w_index[:-1].shape))
                 w_index = w_index / np.sum(w_index)
+            elif tau != t:
+                w_index += w_index.mul(self.return_forecast.filter(self.assets).weight_expr_ahead(t, tau))
+            # if tau != t and self.estimated_index_w:
+            # w_index = np.abs(self.w_index + rng.normal(0, 1, self.w_index.shape))
+            # w_index = w_index / np.sum(w_index)
             else:
-                w_index = self.w_index
-            z = cvx.Variable(w_init.size)
-            wplus = w_init + z
+                w_index = self.w_index.copy()
+
+            z = cvx.Variable(w.size)
+            wplus = w + z
 
             # Objective Function
             # ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(
@@ -1091,7 +1154,18 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
             # )
 
             # ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus=wplus, w_index=w_index)
-            ret = self.gamma_te * cvx.quad_form((wplus - w_index), values_in_time(self.Sigma, t))
+            # ret = self.gamma_te * cvx.quad_form((wplus - w_index), values_in_time(self.Sigma, t))
+
+            if isinstance(self.Sigma, BaseRiskModel):
+                ret = (
+                    self.gamma_te
+                    * self.Sigma.filter(self.assets).weight_expr_ahead(t, tau, wplus - w_index, z, self.value)[0]
+                )
+            else:
+                Sigma = values_in_time(self.Sigma, t)
+                idx = Sigma.columns.get_indexer(self.assets)
+                Sigma_filt = Sigma.loc[:, self.assets].iloc[idx]
+                ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
 
             # l1 penalty term
             ret += mu * cvx.norm(wplus - y[i], 1)
@@ -1143,6 +1217,11 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(self.portfolio)
 
+            # try:
+            #     if w_vars.ndim == 1:
+            #         print("what")
+            # except:
+            #     pass
             return self.optToArr(w_vars)
         except (cvx.SolverError, TypeError) as e:
             logging.error(e)
@@ -1150,7 +1229,13 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
             return self._nulltrade(self.portfolio)
 
     def g(self, w_arr):
+        # return w_arr
         y_arr = np.zeros(w_arr.shape)
+        # try:
+        #     if w_arr.ndim == 1:
+        #         print("what")
+        # except:
+        #     pass
 
         def get_prox(w):
             i_s = np.argsort(w)[::-1][: self.card]
@@ -1158,6 +1243,8 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
             return np.where(np.isin(w, w_s), w / np.sum(w_s), 0)
 
         for i, row in enumerate(w_arr):
+            # if len(row) == 1:
+            #     print("what")
             y_arr[i] = get_prox(row)
 
         return y_arr
@@ -1169,7 +1256,7 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
         return np.array(arr_l)
 
 
-class ADMCardinalitySPO(CardinalitySPO):
+class ADMCardinalitySPO(Cardinality):
     """This is the implementation of ADMM - see A Novel Approach for Solving Convex Problems with Cardinality Constraints,
     prox_algs (boyd).
     """
@@ -1562,7 +1649,7 @@ class ADMCardinalityMPO(ADMCardinalitySPO):
         return w_z.value
 
 
-class NCVXCardinalitySPO(CardinalitySPO):
+class NCVXCardinalitySPO(Cardinality):
     # Does not work at the moment
     def __init__(self, **kwargs):
         self.method = "NCVX"

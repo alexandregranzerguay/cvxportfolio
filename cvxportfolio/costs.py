@@ -115,7 +115,8 @@ class HcostModel(BaseCost):
     def optimization_log(self, t):
         try:
             return self.expression.value
-        except:
+        except Exception as e:
+            print(e)
             return np.NaN
 
     def simulation_log(self, t):
@@ -215,6 +216,8 @@ class TcostModel(BaseCost):
         return self.tmp_tcosts.sum()
 
     def optimization_log(self, t):
+        if self.expression.value is None:
+            return 0
         try:
             return self.expression.value
         except AttributeError:
