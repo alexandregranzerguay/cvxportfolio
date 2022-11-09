@@ -278,6 +278,16 @@ class FixedAlpha(BaseConstraint):
         return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == values_in_time(self.alpha_target, t)
 
 
+# class Alpha(BaseConstraint):
+#     def __init__(self, return_forecast, alpha_target, **kwargs):
+#         super(FixedAlpha, self).__init__(**kwargs)
+#         self.return_return = return_forecast
+
+#     def _weight_expr(self, t, w_plus, z, v):
+#         ret = self.return_forecast.filter(self.assets).weight_expr(t, wplus=wplus, w_index=self.w_index)
+#         return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == values_in_time(self.alpha_target, t)
+
+
 class Cardinality(BaseConstraint):
     """A constraint to impose cardinality constraint on portfolio, this introduces MIP complexity"""
 

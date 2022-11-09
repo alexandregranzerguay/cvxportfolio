@@ -41,7 +41,7 @@ from .utils import null_checker, values_in_time
 class MarketSimulator:
     logger = None
 
-    def __init__(self, market_returns, costs, market_volumes=None, prices=None, cash_key="cash"):
+    def __init__(self, market_returns, costs, market_volumes=None, prices=None, cash_key="cash", goal=None):
         """Provide market returns object and cost objects."""
         self.market_returns = market_returns
         if market_volumes is not None:
@@ -99,18 +99,28 @@ class MarketSimulator:
         u[self.cash_key] = -sum(u[u.index != self.cash_key]) - sum(costs)
         hplus[self.cash_key] = h[self.cash_key] + u[self.cash_key]
 
-        if hplus[self.cash_key] < 0:
-            print(f"negative cash: {hplus[self.cash_key]}")
+        # if hplus[self.cash_key] < 0:
+        #     print(f"negative cash: {hplus[self.cash_key]}")
+
         # print((hplus_old[:-1] != hplus[:-1]).any())
         # print(hplus[self.cash_key])
         # print(u[self.cash_key])
         # logging.info(hplus.index.sort_values())
         # logging.info(self.market_returns.columns.sort_values())
+        # try:
+        #     temp = hplus["STRZA"]
+        # except:
+        #     pass
 
         # assert hplus.index.sort_values().equals(self.market_returns.columns.sort_values())
         h_next = self.market_returns.loc[t] * hplus + hplus
         assert not h_next.isnull().values.all()
         assert not u.isnull().values.all()
+        # try:
+        #     temp = h_next["STRZA"]
+        #     t2 = self.market_returns.loc[t]["STRZA"]
+        # except:
+        #     pass
         return h_next, u
 
     def run_backtest(self, initial_portfolio, start_time, end_time, policy, rebalance_on=None, tqdm_pos=0):
@@ -141,7 +151,7 @@ class MarketSimulator:
 
         for t in tqdm(simulation_times, position=tqdm_pos):
             # # Used for debugging
-            # if t == datetime.strptime("2020-06-25", "%Y-%m-%d"):
+            # if t == datetime.strptime("2006-05-10", "%Y-%m-%d"):
             #     print("check time")
             if t in rebalance_on:
                 logging.info("Getting trades at time %s" % t)
@@ -168,7 +178,10 @@ class MarketSimulator:
                 # idx = policy.index_weights.index.get_loc(t, method="pad")
                 # temp = policy.index_weights.iloc[idx]
                 # results.log_data("w_index", t, policy.index_weights.iloc[idx])
-                results.log_data("w_index", t, policy.index_weights.loc[t])
+                try:
+                    results.log_data("w_index", t, policy.index_weights.loc[t])
+                except:
+                    pass
 
             # Index returns are only monthly... so this won't work
             # if "index_ret" in policy.__dict__:
