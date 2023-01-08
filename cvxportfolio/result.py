@@ -117,9 +117,9 @@ class SimulationResult:
         # TODO mpo policy requires changes in the optimization_log methods
         if not isinstance(self.policy, MultiPeriodOpt):
             for cost in self.policy.costs:
-                if isinstance(cost, TcostModel):
+                try:
                     total_period_cost = cost.optimization_log(t).sum()
-                else:
+                except:
                     total_period_cost = cost.optimization_log(t)
                 self.log_data("policy_" + cost.__class__.__name__, t, total_period_cost)
 

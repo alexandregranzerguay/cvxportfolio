@@ -71,13 +71,12 @@ class FilterAssets:
 
     def filter(self, assets):
         # Returning self, allows for method chaining
+        if not "asset_filter" in self.__dict__:
+            raise ValueError("asset filtering not properly inherited")
         if not self.asset_filter:
             return self
-        if not "assets" in self.__dict__:
-            raise ValueError(
-                "asset filtering not implemented, feature can be turned off by setting asset_filter = False"
-            )
-        self.assets = assets
+        else:
+            self.assets = assets
         return self
 
 
@@ -152,7 +151,6 @@ class LongCash(FilterAssets, BaseConstraint):
           w_plus: holdings
         """
         return w_plus[-1] >= 0
-
 
 class DollarNeutral(BaseConstraint):
     """Long-short dollar neutral strategy."""
@@ -288,15 +286,15 @@ class FixedAlpha(BaseConstraint):
 #         return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == values_in_time(self.alpha_target, t)
 
 
-class Cardinality(BaseConstraint):
+class Cardinality(FilterAssets, BaseConstraint):
     """A constraint to impose cardinality constraint on portfolio, this introduces MIP complexity"""
 
     def __init__(self, limit, **kwargs):
-        super(Cardinality, self).__init__(**kwargs)
         self.limit = limit
+        super().__init__(asset_filter=False, **kwargs)
 
     def _weight_expr(self, t, w_plus, z, v):
-        y = cvx.Variable(w_plus[:-1].shape[0], boolean=True)
+        y = cvx.Variable(w_plus.shape[0], boolean=True)
         constr = []
         constr += [sum(y) <= self.limit]
         for i in range(w_plus[:-1].shape[0]):

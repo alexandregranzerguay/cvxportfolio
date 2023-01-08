@@ -157,10 +157,10 @@ class MarketSimulator:
                 logging.info("Getting trades at time %s" % t)
                 start = time.time()
                 # try:
-                if self.prices is not None:
-                    u = policy.get_rounded_trades(h, self.prices, t)
-                else:
-                    u = policy.get_trades(h, t)
+                # if self.prices is not None:
+                #     u = policy.get_rounded_trades(h, self.prices, t)
+                # else:
+                u = policy.get_trades(h, t)
                 # except Exception as e:
                 #     logging.warning("Solver failed on timestamp %s. Default to no trades." % t)
                 #     print(e)

@@ -85,7 +85,7 @@ class BasePolicy(object, metaclass=ABCMeta):
         # # cash = portfolio[-1] + round_trades @ values_in_time(prices, t)
         # # return np.concatenate((round_trades, cash))
         # return trades
-        trades = self.get_trades(portfolio, t)
+        trades = self.get_trades(portfolio, t, prices)
         # Using floor for now for simplicity but this is sub-optimal obviously
         price_t = values_in_time(prices, t)[trades.index[:-1]]
         portion = np.floor(trades[:-1] / values_in_time(prices, t)[trades.index[:-1]])
@@ -679,7 +679,7 @@ class QuadTrackingSPO(BasePolicy):
 
 class QuadTrackingMPO(QuadTrackingSPO):
     def __init__(
-        self, trading_times: list, terminal_weights: pd.DataFrame, lookahead_periods: int = None, *args, **kwargs
+        self, trading_times: list, terminal_weights: pd.DataFrame, lookahead_periods: int = None, warm_start_w=None, *args, **kwargs
     ):
         """
         trading_times: list, all times at which get_trades will be called
@@ -692,9 +692,10 @@ class QuadTrackingMPO(QuadTrackingSPO):
         self.trading_times = trading_times
         self.terminal_weights = terminal_weights
         self.estimated_index_w = False
+        self.warm_start_w = warm_start_w
         super().__init__(*args, **kwargs)
 
-    def get_trades(self, portfolio, t=dt.datetime.today()):
+    def get_trades(self, portfolio, t=dt.datetime.today(), force_start=None):
 
         if portfolio.isna().any():
             portfolio = portfolio.fillna(0.0)
@@ -785,6 +786,13 @@ class QuadTrackingMPO(QuadTrackingSPO):
         if self.terminal_weights is not None:
             prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
 
+        if self.warm_start_w is not None:
+            for i, z in enumerate(z_vars):
+                if i == 0:
+                    z.value = self.warm_start_w[i] - (portfolio.values / value)
+                else:
+                    z.value = self.warm_start_w[i] - self.warm_start_w[i-1]
+
         # We are summing all problems in order to obtain overall objective
         self.prob = sum(prob_arr)
         try:
@@ -831,10 +839,11 @@ class Cardinality(BasePolicy):
         index_weights=None,
         gamma_te=1,
         thresh=1e-5,
-        max_iter=10,
+        max_iter=3,
         solver=None,
         solver_opts=None,
         index_value=None,
+        store_vals=False,
         **kwargs,
     ):
 
@@ -851,6 +860,7 @@ class Cardinality(BasePolicy):
         self.MAX_ITER = max_iter
         self.gamma_te = gamma_te
         self.Sigma = Sigma
+        self.store_vals = store_vals
         super().__init__(**kwargs)
 
         for cost in costs:
@@ -866,7 +876,7 @@ class Cardinality(BasePolicy):
         self.solver = solver
         self.solver_opts = {} if solver_opts is None else solver_opts
 
-    def get_trades(self, portfolio, t=None):
+    def get_trades(self, portfolio, t=None, force_risk=None):
         """
         Get optimal trade vector for given portfolio at time t.
 
@@ -877,6 +887,8 @@ class Cardinality(BasePolicy):
         t : pd.timestamp
             Timestamp for the optimization.
         """
+        # if force_risk is not None:
+        self.force_risk = force_risk
 
         if t is None:
             t = dt.datetime.today()
@@ -969,8 +981,9 @@ class Cardinality(BasePolicy):
 
 
 class GoalModel:
-    def __init__(self, goal=None, *args, **kwargs):
+    def __init__(self, goal=None, beta=1 / 6, *args, **kwargs):
         self.goal = goal
+        self.beta = beta
         super().__init__(*args, **kwargs)
 
     def get_goal_dist(self, portf_val, method="max"):
@@ -988,64 +1001,92 @@ class GoalModel:
             if max(norm_dist, 0) == 0:
                 return max(norm_dist, 0)
             else:
-                return 1 / (1 + (norm_dist / (1 - norm_dist)) ** (-1 / 10))
+                return 1 / (1 + (norm_dist / (1 - norm_dist)) ** (-self.beta))
 
 
 class PADMCardinalitySPO(Cardinality):
     """This is a crude implementation of PADM - see PADM-Cardinality Constrained Portfolio[73]"""
 
-    def __init__(self, mu=1e-4, **kwargs):
+    def __init__(self, mu=1e-5, **kwargs):
         self.method = "PADM"
         self.mu_start = mu
         super().__init__(**kwargs)
 
-    def PADM(self, t):
+    def PADM(self, t, w0=None, y0=None, mu0=None):
         # y_next = self.w
-        y_next = self._rand_gen(self.w_init.size)
-        iteration = 0
+        # iteration = 0
         mu = self.mu_start
+        if self.store_vals:
+            self.w_store = list()
+            self.y_store = list()
+            self.prob_store = list()
+            # self.w_store.append(self.w_init.value)
+            # self.y_store.append(y_next)
+
+        if None not in (w0, y0, mu0):
+            mu = mu0
+            y_next = y0
+            w_best = w0
+            y_best = y0
+        else:
+            y_next = self._rand_gen(self.w_init.size)
+            w_best = self.f(y_next, mu, t)
+            y_best = self.g(w_best)
+
+        if self.store_vals:
+            self.w_store = list()
+            self.y_store = list()
+            self.prob_store = list()
+            self.w_store.append(w_best)
+            self.y_store.append(y_best)
+
         while True:
-            w_next = self.f(y_next, mu, t)
-            y_next = self.g(w_next)
+            j = 0
+            w_prev = w_best.copy()
+            y_prev = y_best.copy()
+            while True:
+                w_next = self.f(y_next, mu, t)
+                if w_next is None:
+                    w_next = w_prev
+                    break
+                y_next = self.g(w_next)
 
-            # Check stopping criteria
-            if iteration == 0:
-                # diff = np.linalg.norm((w_next - y_next), 1)
-                diff = self._distance(w_next, y_next)
+                # t3 = np.linalg.norm(w_next - w_prev, np.inf)
+                # t4 = np.linalg.norm(y_next - y_prev, np.inf)
+
+                if np.linalg.norm(w_next - w_prev, np.inf) < 1e-5 and np.linalg.norm(y_next - y_prev, np.inf) < 1e-5:
+                    break
+                else:
+                    w_prev = w_next.copy()
+                    y_prev = y_next.copy()
+                    j += 1
+
+                if j >= 10:
+                    print("inner iter max reached")
+                    break
+
+            # If the gap has improved
+            if self._gap(w_best, y_best) > self._gap(w_next, y_next):
+                # Update the best candidate
+                w_best = w_next.copy()
+                y_best = y_next.copy()
+                if self.store_vals:
+                    self.w_store.append(w_next)
+                    self.y_store.append(y_next)
+
+                if np.linalg.norm(w_best - y_best, 1) < self.THRESH:
+                    z = y_best - self.w_init.value
+                    return z
             else:
-                diff_last = diff
-                # diff = np.linalg.norm((w_next - y_next), 1)
-                diff = self._distance(w_next, y_next, method="norm")
-                diff_calc = np.abs(diff_last - diff)
-                # if self._distance(diff_last, diff) < self.THRESH:
-                if diff_calc < self.THRESH:
-                    z = y_next - self.w_init.value
-                    return z
+                y_next = y_best.copy()
+                w_next = w_best.copy()
 
-                if iteration >= self.MAX_ITER:
-                    print("Max iter reached - not optimal!")
-                    z = y_next - self.w_init.value
-                    return z
-            # if iteration == 0:
-            #     w_last = w_next
-            #     y_last = y_next
-            # else:
-            #     diff_last = diff
-            #     # diff = np.linalg.norm((w_next - y_next), 1)
-            #     diff = self._distance(w_next, y_next, method='max')
-            #     diff_calc = np.abs(diff_last - diff)
-            #     # if self._distance(diff_last, diff) < self.THRESH:
-            #     if diff_calc < self.THRESH:
-            #         z = y_next - self.w_init.value
-            #         return z
-
-            #     if iteration >= self.MAX_ITER:
-            #         print("Max iter reached - not optimal!")
-            #         z = y_next - self.w_init.value
-            #         return z
+            if mu > 1e4:
+                print(f"couldn't beat {self._gap(w_best, y_best)}")
+                z = y_best - self.w_init.value
+                return z
 
             mu *= 10
-            iteration += 1
 
     def f(self, y, mu, t):
         z = cvx.Variable(self.w_init.size)
@@ -1055,6 +1096,14 @@ class PADMCardinalitySPO(Cardinality):
         # ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
         # ret = self.gamma_te * cvx.quad_form((wplus - self.w_index), values_in_time(self.Sigma, t))
         if isinstance(self.Sigma, BaseRiskModel):
+            if self.force_risk is not None:
+                # idx = self.force_risk.columns.get_indexer(self.assets)
+                # Sigma_filt = self.force_risk.loc[:, self.assets].iloc[idx]
+                # print(Sigma_filt.shape)
+                # ret = self.gamma_te * cvx.quad_form((wplus - self.w_index), Sigma_filt)
+                # assert ret.is_convex()
+                self.Sigma.Sigma = self.force_risk
+            # else:
             ret = self.gamma_te * self.Sigma.filter(self.assets).weight_expr(t, wplus - self.w_index, z, self.value)[0]
         else:
             Sigma = values_in_time(self.Sigma, t)
@@ -1089,14 +1138,16 @@ class PADMCardinalitySPO(Cardinality):
             assert el.is_dcp()
 
         obj = cvx.Minimize(ret + sum(costs))
-        prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
+        self.prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
         try:
-            prob.solve(solver=self.solver, **self.solver_opts)
-            if prob.status == "unbounded":
+            self.prob.solve(solver=self.solver, **self.solver_opts)
+            if self.store_vals:
+                self.prob_store.append(self.prob)
+            if self.prob.status == "unbounded":
                 logging.error("The problem is unbounded. Defaulting to no trades")
                 return self._nulltrade(self.portfolio)
 
-            if prob.status == "infeasible":
+            if self.prob.status == "infeasible":
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(self.portfolio)
             return wplus.value
@@ -1108,6 +1159,9 @@ class PADMCardinalitySPO(Cardinality):
         i_s = np.argsort(w_next)[::-1][: self.card]
         w_s = w_next[i_s]
         return np.where(np.isin(w_next, w_s), w_next / np.sum(w_s), 0)
+
+    def _gap(self, w, y):
+        return np.linalg.norm(w - y, 1)
 
 
 class MaxPADMCardinalitySPO(GoalModel, PADMCardinalitySPO):
@@ -1217,7 +1271,7 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
         self.estimated_index_w = False
         super().__init__(*args, **kwargs)
 
-    def PADM(self, t=dt.datetime.today()):
+    def PADM(self, t=dt.datetime.today(), w0=None, y0=None, mu0=None):
 
         # self.portfolio = portfolio
         # self.value = sum(self.portfolio)
@@ -1230,37 +1284,101 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
             self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
         ]
 
-        iteration = 0
+        # iteration = 0
         mu = self.mu_start
 
+        if self.store_vals:
+            self.w_store = list()
+            self.y_store = list()
+            self.prob_store = list()
+            # self.w_store.append(self.w_init)
+            # self.y_store.append(y)
+
+        if all(item is not None for item in [w0, y0, mu0]):
+            mu = mu0
+            y = y0
+            w_best = w0
+            y_best = y0
+            # norm_last = 1e5
+        else:
+
+            y = self._rand_gen((len(tau_times), self.w_init.size))
+            w_best = self.f(y, mu, t, tau_times)
+            y_best = self.g(w_best)
+            # norm_last = 1e5
+
+        if self.store_vals:
+            # self.w_store = list()
+            # self.y_store = list()
+            # self.prob_store = list()
+            self.w_store.append(w_best)
+            self.y_store.append(y_best)
         # y generated based off current
         # y = np.array([self.w_init] * len(tau_times))
         # randomly generated y
-        y = self._rand_gen((len(tau_times), self.w_init.size))
+
+        
         while True:
-            # W incorporates return and TE and outter w_plus
-            w = self.f(y, mu, t, tau_times)
-            # y incorporates cardinality constraint
-            y = self.g(w)
+            j = 0
+            w_prev = w_best.copy()
+            y_prev = y_best.copy()
+            # w_gap_prev = None
+            while True:
+                w = self.f(y, mu, t, tau_times)
+                if w is None:
+                    w = w_prev
+                y = self.g(w)
 
-            # Check stopping criteria
-            if iteration == 0:
-                diff = self._distance(w, y)
+                if np.linalg.norm(w - w_prev, np.inf) < 1e-4 and np.linalg.norm(y - y_prev, np.inf) < 1e-4:
+                    break
+                else:
+                    j += 1
+                    w_prev = w.copy()
+                    y_prev = y.copy()
+
+                if j >= 10:
+                    print("inner loop max iter")
+                    break
+
+            best_gap = self._gap(w_best, y_best)
+            current_gap = self._gap(w, y)
+
+            # If the gap has improved
+            if self._gap(w_best, y_best) > self._gap(w, y):
+                # Update the best candidate
+                w_best = w.copy()
+                y_best = y.copy()
+                if self.store_vals:
+                    self.w_store.append(w)
+                    self.y_store.append(y)
+
+                if np.linalg.norm(w_best - y_best, 1) < self.THRESH:
+                    z = y_best[0] - self.w_init.value
+                    return z
             else:
-                diff_last = diff
-                diff = self._distance(w, y)
-                diff_calc = np.abs(diff_last - diff)
-                if diff_calc < self.THRESH:
-                    z = y[0] - self.w_init.value
-                    return z
+                y = y_best.copy()
+                w = w_best.copy()
 
-                if iteration >= self.MAX_ITER:
-                    logging.info("Max iter reached - not optimal!")
-                    z = y[0] - self.w_init.value
-                    return z
+            # Check stuck conditions
 
+            # Commented this out because it didn't seem to happen anymore
+            # if mu > 100 and np.abs(norm_last - np.linalg.norm(w - y, 1)) < (self.THRESH):
+            #     print("stuck")
+            #     z = y_best[0] - self.w_init.value
+            #     return z
+            # return self.PADM(t, w0=w_best, y0=y_best, mu0=self.mu_start * 10)
+            # if iteration >= self.MAX_ITER:
+            #     print("Max iter reached - not optimal!")
+            #     # z = y_best[0] - self.w_init.value
+            #     # return z
+            #     return self.PADM(t, w0=w_best, y0=y_best, mu0=self.mu_start * 10)
+            if mu > 1e4:
+                print(f"couldn't beat {self._gap(w_best, y_best)}")
+                z = y_best[0] - self.w_init.value
+                return z
+
+            # norm_last = np.linalg.norm(w - y, 1)
             mu *= 10
-            iteration += 1
 
     def f(self, y, mu, t, tau_times):
         prob_arr = []
@@ -1346,6 +1464,8 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
         self.prob = sum(prob_arr)
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
+            if self.store_vals:
+                self.prob_store.append(self.prob)
             if self.prob.status == "unbounded":
                 logging.error("The problem is unbounded. Defaulting to no trades")
                 return self._nulltrade(self.portfolio)
@@ -1354,23 +1474,26 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
                 logging.error("The problem is infeasible. Defaulting to no trades")
                 return self._nulltrade(self.portfolio)
 
-            # try:
-            #     if w_vars.ndim == 1:
-            #         print("what")
-            # except:
-            #     pass
             return self.optToArr(w_vars)
         except (cvx.SolverError, TypeError) as e:
             logging.error(e)
             logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
-            return self._nulltrade(self.portfolio)
+            return np.zeros(shape=y.shape)
 
     def g(self, w_arr):
         # return w_arr
         y_arr = np.zeros(w_arr.shape)
+        if (w_arr == 0).all():
+            return y_arr
         # try:
         #     if w_arr.ndim == 1:
         #         print("what")
+        # except:
+        #     pass
+        # try:
+        #     if w == 0:
+        #         print('empty portfolio')
+        #         return self._nulltrade(self.portfolio)
         # except:
         #     pass
 
@@ -1380,8 +1503,12 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
             return np.where(np.isin(w, w_s), w / np.sum(w_s), 0)
 
         for i, row in enumerate(w_arr):
-            # if len(row) == 1:
-            #     print("what")
+            # print(row)
+            try:
+                if row == 0.0:
+                    continue
+            except:
+                pass
             y_arr[i] = get_prox(row)
 
         return y_arr
@@ -1420,7 +1547,7 @@ class MaxPADMCardinalityMPO(GoalModel, PADMCardinalityMPO):
             z = cvx.Variable(w.size)
             wplus = w + z
 
-            alpha = self.get_goal_dist(self.value, method="pow")
+            alpha = self.get_goal_dist(self.value, method="special")
 
             # Objective Function
             ret = (
