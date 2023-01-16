@@ -601,6 +601,12 @@ class QuadTrackingSPO(BasePolicy):
         # ret = self.gamma_te * cvx.norm(wplus - w_index, 2)
         else:
             if isinstance(self.Sigma, BaseRiskModel):
+                # Uncomment for Huang et al.
+                # h_index_ret = w_index @ self.return_forecast
+                # h_port_ret = self.gamma_excess * self.return_forecast.filter(assets).weight_expr(t, wplus, w_index=w_index)
+                # huang = cvx.square(cvx.pos(h_index_ret - h_port_ret))
+                # ret = huang
+
                 ret = self.gamma_te * self.Sigma.filter(assets).weight_expr(t, wplus - w_index, z, value)[0]
             else:
                 Sigma = values_in_time(self.Sigma, t)
@@ -754,6 +760,12 @@ class QuadTrackingMPO(QuadTrackingSPO):
             # ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
             else:
                 if isinstance(self.Sigma, BaseRiskModel):
+                    # Uncomment for Huang et al.
+                    # h_index_ret = w_index @ self.return_forecast
+                    # h_port_ret = self.gamma_excess * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus, w_index)
+                    # huang = cvx.square(cvx.pos(h_index_ret - h_port_ret))
+                    # ret = huang
+
                     ret = (
                         self.gamma_te
                         * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
