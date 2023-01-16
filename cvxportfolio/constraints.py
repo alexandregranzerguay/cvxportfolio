@@ -28,6 +28,7 @@ __all__ = [
     "LongOnly",
     "LeverageLimit",
     "LongCash",
+    "MaxCash",
     "DollarNeutral",
     "MaxTrade",
     "MaxWeights",
@@ -151,6 +152,28 @@ class LongCash(FilterAssets, BaseConstraint):
           w_plus: holdings
         """
         return w_plus[-1] >= 0
+
+
+class MaxCash(FilterAssets, BaseConstraint):
+    """A max limit on weight of cash.
+
+    Attributes:
+      limit: A series or number giving the weights limit.
+    """
+
+    def __init__(self, limit, **kwargs):
+        self.limit = limit
+        super().__init__(asset_filter=False, **kwargs)
+
+    def _weight_expr(self, t, w_plus, z, v):
+        """Returns a list of holding constraints.
+
+        Args:
+          t: time
+          w_plus: holdings
+        """
+        return w_plus[-1] <= values_in_time(self.limit, t)
+
 
 class DollarNeutral(BaseConstraint):
     """Long-short dollar neutral strategy."""
@@ -375,6 +398,7 @@ class TrackingErrorMax(FilterAssets, BaseConstraint):
         self.limit = limit
         self.index_weights = index_weights
         self.assets = Sigma.columns
+        self.cond = 1
         # self.index_prices = index_prices
         try:
             assert not pd.isnull(Sigma).values.any()
@@ -391,12 +415,14 @@ class TrackingErrorMax(FilterAssets, BaseConstraint):
         self.w_bench["cash"] = 0
         self.w_bench = self.w_bench[self.assets]
         self.expression = self._estimate(t, w_plus - self.w_bench, z, value)
+        # self.expression = self.Sigma.filter(self.assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
         return self.expression <= values_in_time(self.limit, t)
 
     def _estimate(self, t, wplus, z, value):
         Sigma = values_in_time(self.Sigma, t)
         idx = Sigma.columns.get_indexer(self.assets)
         Sigma = Sigma.loc[:, self.assets].iloc[idx]
+        Sigma = Sigma + self.cond * np.diag(np.ones(Sigma.shape[0]))
         try:
             self.expression = cvx.quad_form(wplus, Sigma)
         except TypeError:
