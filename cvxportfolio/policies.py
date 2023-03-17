@@ -770,6 +770,7 @@ class QuadTrackingMPO(QuadTrackingSPO):
                         self.gamma_te
                         * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
                     )
+                    ret += self.gamma_te * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus, w_index)
                 else:
                     Sigma = values_in_time(self.Sigma, t)
                     idx = Sigma.columns.get_indexer(assets)
