@@ -20,6 +20,7 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import datetime as dt
 
 
 logger = logging.getLogger(__name__)
@@ -101,3 +102,11 @@ def non_null_data_args(f):
             null_checker(el)
         return f(*args, **kwds)
     return new_f
+
+
+def get_next_workday(date):
+    if date.isoweekday() % 5 == 0:
+        date += dt.timedelta(days=3)
+    else:
+        date += dt.timedelta(days=1)
+    return date

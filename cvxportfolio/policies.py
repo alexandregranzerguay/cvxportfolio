@@ -49,6 +49,7 @@ __all__ = [
     "PosTrackingSinglePeriodOpt",
     "QuadTrackingSPO",
     "QuadTrackingMPO",
+    "GoalQuadTrackingMPO",
     "PADMCardinalitySPO",
     "ADMCardinalitySPO",
     "NCVXCardinalitySPO",
@@ -770,7 +771,9 @@ class QuadTrackingMPO(QuadTrackingSPO):
                         self.gamma_te
                         * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
                     )
-                    ret += self.gamma_te * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus, w_index)
+                    ret += self.gamma_te * self.return_forecast.filter(assets).weight_expr_ahead(
+                        t, tau, wplus, w_index
+                    )
                 else:
                     Sigma = values_in_time(self.Sigma, t)
                     idx = Sigma.columns.get_indexer(assets)
@@ -849,6 +852,212 @@ class QuadTrackingMPO(QuadTrackingSPO):
         for el in l:
             arr_l.append(el.value)
         return np.array(arr_l)
+
+
+class GoalQuadTrackingMPO(QuadTrackingSPO):
+    def __init__(
+        self,
+        goal: int,
+        trading_times: list,
+        terminal_weights: pd.DataFrame,
+        gamma_U,
+        lookahead_periods: int = None,
+        warm_start_w=None,
+        *args,
+        **kwargs,
+    ):
+        """
+        goal: int, wealth goal value
+        trading_times: list, all times at which get_trades will be called
+        lookahead_periods: int or None. if None uses all remaining periods
+        index_weights: Dataframe or array of weights at each time t, or constant over time
+        Q: list of Q matrix for each time step
+        """
+        # Number of periods to look ahead.
+        self.lookahead_periods = lookahead_periods
+        self.trading_times = trading_times
+        self.terminal_weights = terminal_weights
+        self.estimated_index_w = False
+        self.warm_start_w = warm_start_w
+        self.goal = goal
+        self.gamma_U = gamma_U
+
+        super().__init__(*args, **kwargs)
+
+    def get_trades(self, portfolio, t=dt.datetime.today(), force_start=None):
+
+        if portfolio.isna().any():
+            portfolio = portfolio.fillna(0.0)
+
+        # Filter index benchmark portfolio
+        w_index = values_in_time(self.index_weights, t).pipe(self.pre_filter)
+        w_index["cash"] = 0
+        self.w_index = w_index.copy()
+        assets = w_index.index
+
+        # Pre-Optimization
+        portfolio = portfolio.pipe(self.pre_filter, assets)
+        value = portfolio.sum()
+        assert value > 0.0
+        w = cvx.Constant(portfolio.values / value)
+
+        prob_arr = []
+        z_vars = []
+
+        rng = np.random.default_rng()
+
+        index_track = list()
+        w_arr = list()
+        # planning_periods = self.lookahead_model.get_periods(t)
+        for tau in self.trading_times[
+            self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
+        ]:
+            if tau != t and self.estimated_index_w:
+                w_index[:-1] = np.abs(w_index[:-1] + rng.normal(0, 0.01, w_index[:-1].shape))
+                w_index = w_index / np.sum(w_index)
+            elif tau != t:
+                temp_w = w_index + w_index.mul(self.return_forecast.filter(assets).weight_expr_ahead(t, tau))
+                w_index = temp_w / temp_w.sum()
+                # w_index += w_index.mul(self.return_forecast.filter(assets).weight_expr_ahead(t, tau))
+
+            index_track.append(w_index.copy())
+            z = cvx.Variable(*w.shape)
+            wplus = w + z
+
+            if isinstance(self.Sigma, BaseRiskModel):
+                risk = (
+                    self.gamma_te * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
+                )
+                ret = self.gamma_te * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus)
+                utility = self.gamma_U * ((1 - cvx.exp(-0.5 * (ret * value - self.goal))) / (0.5))
+            else:
+                ValueError("self.Sigma is incorrect")
+
+            assert ret.is_convex()
+            # assert utility.is_concave()
+            assert risk.is_convex()
+            # assert (risk - utility).is_convex
+            # assert tracking_term.is_convex()
+
+            costs, constraints = [], []
+
+            for cost in self.costs:
+                cost_expr, const_expr = cost.weight_expr_ahead(t, tau, wplus, z, value)
+                if isinstance(cost, TcostModel):
+                    tcost = cost_expr
+                costs.append(cost_expr)
+                constraints += const_expr
+
+            for item in (con.filter(assets).weight_expr(t, wplus, z, value) for con in self.constraints):
+                if isinstance(item, list):
+                    constraints += item
+                else:
+                    constraints += [item]
+
+            for el in costs:
+                assert el.is_convex()
+
+            for el in constraints:
+                assert el.is_dcp()
+
+            obj = cvx.Minimize(risk - utility + sum(costs))
+            prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
+            prob_arr.append(prob)
+            z_vars.append(z)
+            w_arr.append(wplus)
+            w = wplus
+
+        # Terminal constraint.
+        if self.terminal_weights is not None:
+            prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
+
+        if self.warm_start_w is not None:
+            for i, z in enumerate(z_vars):
+                if i == 0:
+                    z.value = self.warm_start_w[i] - (portfolio.values / value)
+                else:
+                    z.value = self.warm_start_w[i] - self.warm_start_w[i - 1]
+
+        # We are summing all problems in order to obtain overall objective
+        self.prob = sum(prob_arr)
+        try:
+            self.prob.solve(solver=self.solver, **self.solver_opts)
+            # temp3 = self.index_weights.loc[t]
+            # temp2 = np.abs(index_track[0] - self.index_weights.loc[t])
+            # temp = np.abs(self.optToArr(w_arr) - index_track)
+            if self.prob.status == "unbounded":
+                logging.error("The problem is unbounded. Defaulting to no trades")
+                return self._nulltrade(portfolio)
+
+            if self.prob.status == "infeasible":
+                logging.error("The problem is infeasible. Defaulting to no trades")
+                return self._nulltrade(portfolio)
+
+            # for con in prob_arr[0].constraints:
+            #     if con.id == self.te_const_id:
+            return pd.Series(index=portfolio.index, data=(z_vars[0].value * value))
+        except (cvx.SolverError, TypeError) as e:
+            # for cost in self.costs:
+            #     cost.expression.value = 0
+            logging.error(e)
+            logging.error("The solver %s failed. Defaulting to no trades" % self.solver)
+            return self._nulltrade(portfolio)
+
+    def optToArr(self, l):
+        arr_l = list()
+        for el in l:
+            arr_l.append(el.value)
+        return np.array(arr_l)
+
+
+class MC:
+    def __init__(self, policy, real_rets, trading_periods):
+        self.policy = policy
+        self.real_rets = real_rets
+
+    # "intercept" the get trades call
+    def get_trades(self, portfolio, t=dt.datetime.today(), force_start=None):
+        # Get trades as usual
+        trades = self.get_trades(portfolio, t=dt.datetime.today(), force_start=None)
+
+        # Update estimates using new data
+        # end_idx = self.real_rets.index.get_indexer(t) +
+        new_idx = self.policy.trading_times.index(t) + 1
+        end_dt = self.policy.trading_times[new_idx]
+        ret = self.real_rets.loc[:end_dt].iloc[-252:]  # get new 252 day data
+        self.policy.return_forecast.alpha_data = self.update_ret_hat(
+            ret, t, self.policy.trading_times, self.policy.lookahead_periods, sample_size=1000
+        )
+
+        if self.policy.return_forecast.covariance_matrix is not None:
+            self.policy.return_forecast.covariance_matrix = np.cov(ret, rowvar=False)
+
+        return trades
+
+    def update_ret_hat(self, ret, current_time, trading_times, lookahead_periods, sample_size=1000):
+        estimates = {}
+        rng = np.random.default_rng()
+        mu = np.mean(ret, axis=0)
+        cov = np.cov(ret, rowvar=False)
+        # I don't think I need to do 1 year's worth of random returns. Would I not only need to do
+        # a lookahead's worth
+
+        start_idx = trading_times.to_list().index(current_time) + 1
+        periods = trading_times[start_idx : start_idx + lookahead_periods]
+        index_list = ret.loc[periods[0] : periods[-1]].index
+        num_days = len(index_list)
+
+        # create planning matrix
+        mvn = rng.multivariate_normal(mu, cov, size=(sample_size, num_days))
+        mvn_avg = pd.DataFrame(index=index_list, data=mvn.mean(axis=0), columns=ret.columns)
+
+        for i, tau in enumerate(periods):
+            print(periods[max(0, i - 1)], tau)
+            estimates[(periods[0], tau)] = ((mvn_avg.loc[periods[max(0, i - 1)] : tau] + 1).cumprod() - 1).iloc[
+                -1
+            ]  # cumulative return for each rebal periods
+
+        return estimates
 
 
 class Cardinality(BasePolicy):

@@ -20,7 +20,8 @@ import pandas as pd
 import numpy as np
 import functools
 from .expression import Expression
-from .utils import values_in_time, null_checker
+from .utils import values_in_time, null_checker, get_next_workday
+from dateutil.relativedelta import relativedelta
 
 __all__ = [
     "ReturnsForecast",
@@ -132,6 +133,9 @@ class ReturnsForecast(BlackLittermanModel):
         if self.covariance_matrix is not None and w_index is not None:
             alpha = self.get_BL(returns, w_index, t)
             return alpha @ (wplus - w_index)
+        elif w_index is None:
+            alpha = returns
+            return alpha @ wplus
         elif wplus is None:
             alpha = returns
             # assert (isinstance(alpha, float))

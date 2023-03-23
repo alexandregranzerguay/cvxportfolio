@@ -156,38 +156,19 @@ class MarketSimulator:
             if t in rebalance_on:
                 logging.info("Getting trades at time %s" % t)
                 start = time.time()
-                # try:
-                # if self.prices is not None:
-                #     u = policy.get_rounded_trades(h, self.prices, t)
-                # else:
                 u = policy.get_trades(h, t)
-                # except Exception as e:
-                #     logging.warning("Solver failed on timestamp %s. Default to no trades." % t)
-                #     print(e)
-                #     u = pd.Series(index=h.index, data=0.0)
                 end = time.time()
-                # for cost in policy.costs:
-                #     if cost.expression.value is None:
-                #         print("now")
                 results.log_policy(t, end - start)
             else:
                 logging.info(f"{t} is not a rebalancing date")
                 u = pd.Series(index=h.index, data=0.0)
 
             if "index_weights" in policy.__dict__:
-                # idx = policy.index_weights.index.get_loc(t, method="pad")
-                # temp = policy.index_weights.iloc[idx]
-                # results.log_data("w_index", t, policy.index_weights.iloc[idx])
                 try:
                     results.log_data("w_index", t, policy.index_weights.loc[t])
                 except:
                     pass
 
-            # Index returns are only monthly... so this won't work
-            # if "index_ret" in policy.__dict__:
-            # results.log_data("index_ret", t, policy.index_ret.loc[t])
-            # idx = policy.index_weights.index.get_loc(t, method="pad")
-            # results.log_data("w_index", t, policy.index_weights.iloc[idx])
             assert not pd.isnull(u).any()
             logging.info("Propagating portfolio at time %s" % t)
             start = time.time()
