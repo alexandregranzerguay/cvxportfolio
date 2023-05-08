@@ -498,6 +498,32 @@ class PosTrackingSinglePeriodOpt(BasePolicy):
             return self._nulltrade(portfolio)
 
 
+class UtilityModel:
+    def __init__(self, goal=None, beta=1 / 6, *args, **kwargs):
+        self.goal = goal
+        super().__init__(*args, **kwargs)
+
+    def get_utility(self, portf_val, method="max", beta=None):
+        if self.goal is None:
+            return 0
+
+        norm_dist = portf_val / self.goal
+        if method == "max":
+            return max(norm_dist, 0)
+        elif method == "pow":
+            return norm_dist**beta
+        elif method == "exp":
+            # return cvx.exp(self.beta * norm_dist)
+            return cvx.exp(beta * (norm_dist)) - 1
+        elif method == "log":
+            return cvx.log((portf_val / self.goal))
+        elif method == "special":
+            if max(norm_dist, 0) == 0:
+                return max(norm_dist, 0)
+            else:
+                return 1 / (1 + (norm_dist / (1 - norm_dist)) ** (-beta))
+
+
 class QuadTrackingSPO(BasePolicy):
     """Single-period optimization policy.
 
@@ -750,35 +776,20 @@ class QuadTrackingMPO(QuadTrackingSPO):
             z = cvx.Variable(*w.shape)
             wplus = w + z
 
-            if self.max_ret:
-                # Use max mu^T @ (w - w_index) as objective and constrain excess risk
-                ret = self.gamma_excess * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus, w_index)
+            # if self.max_ret:
+            # Use max mu^T @ (w - w_index) as objective and constrain excess risk
+            # ret = self.gamma_excess * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus, w_index)
+            ret = -self.gamma_excess * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus)
             # Sigma = values_in_time(self.Sigma, t)
             # Test that weight_expr_ahead works for Sigma
             # ret = self.gamma_te * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
             # idx = Sigma.columns.get_indexer(assets)
             # Sigma_filt = Sigma.loc[:, assets].iloc[idx]
             # ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
-            else:
-                if isinstance(self.Sigma, BaseRiskModel):
-                    # Uncomment for Huang et al.
-                    # h_index_ret = w_index @ self.return_forecast
-                    # h_port_ret = self.gamma_excess * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus, w_index)
-                    # huang = cvx.square(cvx.pos(h_index_ret - h_port_ret))
-                    # ret = huang
-
-                    ret = (
-                        self.gamma_te
-                        * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
-                    )
-                    ret += self.gamma_te * self.return_forecast.filter(assets).weight_expr_ahead(
-                        t, tau, wplus, w_index
-                    )
-                else:
-                    Sigma = values_in_time(self.Sigma, t)
-                    idx = Sigma.columns.get_indexer(assets)
-                    Sigma_filt = Sigma.loc[:, assets].iloc[idx]
-                    ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
+            risk = self.gamma_te * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
+            # ret = self.gamma_te * self.return_forecast.filter(assets).weight_expr_ahead(
+            #     t, tau, wplus, w_index
+            # )
 
             assert ret.is_convex()
             # assert tracking_term.is_convex()
@@ -854,10 +865,9 @@ class QuadTrackingMPO(QuadTrackingSPO):
         return np.array(arr_l)
 
 
-class GoalQuadTrackingMPO(QuadTrackingSPO):
+class GoalQuadTrackingMPO(UtilityModel, QuadTrackingSPO):
     def __init__(
         self,
-        goal: int,
         trading_times: list,
         terminal_weights: pd.DataFrame,
         gamma_U,
@@ -867,7 +877,6 @@ class GoalQuadTrackingMPO(QuadTrackingSPO):
         **kwargs,
     ):
         """
-        goal: int, wealth goal value
         trading_times: list, all times at which get_trades will be called
         lookahead_periods: int or None. if None uses all remaining periods
         index_weights: Dataframe or array of weights at each time t, or constant over time
@@ -879,7 +888,6 @@ class GoalQuadTrackingMPO(QuadTrackingSPO):
         self.terminal_weights = terminal_weights
         self.estimated_index_w = False
         self.warm_start_w = warm_start_w
-        self.goal = goal
         self.gamma_U = gamma_U
 
         super().__init__(*args, **kwargs)
@@ -898,17 +906,31 @@ class GoalQuadTrackingMPO(QuadTrackingSPO):
         # Pre-Optimization
         portfolio = portfolio.pipe(self.pre_filter, assets)
         value = portfolio.sum()
+        risk_weight = max(0, min(1, 1 - value / self.goal))  # [0,1]
+        print(self.goal)
         assert value > 0.0
         w = cvx.Constant(portfolio.values / value)
 
         prob_arr = []
         z_vars = []
+        risk_vars = []
+        utility_vars = []
+        ret_vars = []
 
         rng = np.random.default_rng()
 
         index_track = list()
         w_arr = list()
+
+        trade_ratio = self.gamma_te / self.gamma_trade  # This is the optimized ratio for trade vs risk
         # planning_periods = self.lookahead_model.get_periods(t)
+
+        # check if returns and risk matrices need to be updated
+        if hasattr(self.return_forecast, "update"):
+            self.return_forecast.update(t)
+        if hasattr(self.Sigma, "update"):
+            self.Sigma.filter(assets).update(t)
+
         for tau in self.trading_times[
             self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
         ]:
@@ -924,19 +946,17 @@ class GoalQuadTrackingMPO(QuadTrackingSPO):
             z = cvx.Variable(*w.shape)
             wplus = w + z
 
-            if isinstance(self.Sigma, BaseRiskModel):
-                risk = (
-                    self.gamma_te * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
-                )
-                ret = self.gamma_te * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus)
-                utility = self.gamma_U * ((1 - cvx.exp(-0.5 * (ret * value - self.goal))) / (0.5))
-            else:
-                ValueError("self.Sigma is incorrect")
+            track = trade_ratio * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
+            ret = trade_ratio * self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus)
+            risk = trade_ratio * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus, z, value)[0]
+            # utility = trade_ratio * self.get_utility(ret * value, method="pow")
+            # utility_ret = trade_ratio * self.get_utility(ret * value, method="pow", beta=1 / 2)
+            # utility_risk = trade_ratio * self.get_utility(risk, method="pow", beta=2)
 
-            assert ret.is_convex()
-            # assert utility.is_concave()
-            assert risk.is_convex()
-            # assert (risk - utility).is_convex
+            # assert track.is_convex()
+            # assert risk.is_convex()
+            # assert risk.is_convex()
+            # assert (utility_ret - utility_risk).is_concave()
             # assert tracking_term.is_convex()
 
             costs, constraints = [], []
@@ -960,7 +980,23 @@ class GoalQuadTrackingMPO(QuadTrackingSPO):
             for el in constraints:
                 assert el.is_dcp()
 
-            obj = cvx.Minimize(risk - utility + sum(costs))
+            risk_vars.append(risk)
+            utility_vars.append(track)
+            ret_vars.append(ret)
+
+            # obj = cvx.Minimize(risk - utility + sum(costs))
+            # obj = cvx.Minimize(-utility + sum(costs))
+            # obj = cvx.Minimize(utility)
+            # obj = cvx.Minimize((risk_weight) * track + (1 - risk_weight) * risk + sum(costs))
+            # obj = cvx.Minimize(
+            #     1e1 * (risk_weight) * ret + (risk_weight) * track + (1 - risk_weight) * risk + sum(costs)
+            # )
+            obj = cvx.Minimize(- (risk_weight) * ret +  (1 - risk_weight) * risk)
+            # obj = cvx.Minimize(risk)
+            # obj = cvx.Maximize(utility_ret - utility_risk)
+            # obj = cvx.Maximize(utility_ret - utility_risk)
+
+            # obj = cvx.Minimize(-ret + sum(costs))
             prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
             prob_arr.append(prob)
             z_vars.append(z)
@@ -983,6 +1019,10 @@ class GoalQuadTrackingMPO(QuadTrackingSPO):
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
             # temp3 = self.index_weights.loc[t]
+            self.risk_weights = risk_weight
+            self.risk_vals = risk_vars[0].value
+            self.utility_vals = utility_vars[0].value
+            self.ret_vals = ret_vars[0].value
             # temp2 = np.abs(index_track[0] - self.index_weights.loc[t])
             # temp = np.abs(self.optToArr(w_arr) - index_track)
             if self.prob.status == "unbounded":
@@ -1008,56 +1048,6 @@ class GoalQuadTrackingMPO(QuadTrackingSPO):
         for el in l:
             arr_l.append(el.value)
         return np.array(arr_l)
-
-
-class MC:
-    def __init__(self, policy, real_rets, trading_periods):
-        self.policy = policy
-        self.real_rets = real_rets
-
-    # "intercept" the get trades call
-    def get_trades(self, portfolio, t=dt.datetime.today(), force_start=None):
-        # Get trades as usual
-        trades = self.get_trades(portfolio, t=dt.datetime.today(), force_start=None)
-
-        # Update estimates using new data
-        # end_idx = self.real_rets.index.get_indexer(t) +
-        new_idx = self.policy.trading_times.index(t) + 1
-        end_dt = self.policy.trading_times[new_idx]
-        ret = self.real_rets.loc[:end_dt].iloc[-252:]  # get new 252 day data
-        self.policy.return_forecast.alpha_data = self.update_ret_hat(
-            ret, t, self.policy.trading_times, self.policy.lookahead_periods, sample_size=1000
-        )
-
-        if self.policy.return_forecast.covariance_matrix is not None:
-            self.policy.return_forecast.covariance_matrix = np.cov(ret, rowvar=False)
-
-        return trades
-
-    def update_ret_hat(self, ret, current_time, trading_times, lookahead_periods, sample_size=1000):
-        estimates = {}
-        rng = np.random.default_rng()
-        mu = np.mean(ret, axis=0)
-        cov = np.cov(ret, rowvar=False)
-        # I don't think I need to do 1 year's worth of random returns. Would I not only need to do
-        # a lookahead's worth
-
-        start_idx = trading_times.to_list().index(current_time) + 1
-        periods = trading_times[start_idx : start_idx + lookahead_periods]
-        index_list = ret.loc[periods[0] : periods[-1]].index
-        num_days = len(index_list)
-
-        # create planning matrix
-        mvn = rng.multivariate_normal(mu, cov, size=(sample_size, num_days))
-        mvn_avg = pd.DataFrame(index=index_list, data=mvn.mean(axis=0), columns=ret.columns)
-
-        for i, tau in enumerate(periods):
-            print(periods[max(0, i - 1)], tau)
-            estimates[(periods[0], tau)] = ((mvn_avg.loc[periods[max(0, i - 1)] : tau] + 1).cumprod() - 1).iloc[
-                -1
-            ]  # cumulative return for each rebal periods
-
-        return estimates
 
 
 class Cardinality(BasePolicy):
@@ -1162,33 +1152,6 @@ class Cardinality(BasePolicy):
             df = df[assets]
         return df
 
-    # def _get_index_weights(self, t):
-    #     if self.index_weights is not None:
-    #         try:
-    #             index_weights = self.index_weights.loc[t]
-    #             index_weights["Cash"] = 0
-    #             return index_weights
-    #         except:
-    #             idx = self.index_weights.index.get_loc(t, method="pad")
-    #             index_weights = self.index_weights.iloc[idx]
-    #             t = index_weights.sum()
-    #             index_weights["Cash"] = 0
-    #             return index_weights
-    #     else:
-    #         idx = self.float_shares.index.get_loc(t, method="pad")
-    #         market_cap = self.float_shares.iloc[idx].multiply(values_in_time(self.index_prices, t)).fillna(0)
-    #         if market_cap.ndim > 1:
-    #             raise KeyError(f"Missing index data at {t}")
-    #         index_weights = market_cap / market_cap.sum()
-    #         index_weights["Cash"] = 0
-    #         return index_weights
-
-    # def _get_index_weights(self, t):
-    #     market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
-    #     index_weights = market_cap / market_cap.sum()
-    #     index_weights["Cash"] = 0
-    #     return index_weights
-
     def _rand_gen(self, shape: tuple):
         # generator
         rng = np.random.default_rng()
@@ -1213,30 +1176,6 @@ class Cardinality(BasePolicy):
             return np.linalg.norm((prev - curr), 2) ** 2
         elif method == "max":
             return np.max((prev - curr))
-
-
-class GoalModel:
-    def __init__(self, goal=None, beta=1 / 6, *args, **kwargs):
-        self.goal = goal
-        self.beta = beta
-        super().__init__(*args, **kwargs)
-
-    def get_goal_dist(self, portf_val, method="max"):
-        if self.goal is None:
-            return 0
-
-        norm_dist = (self.goal - portf_val) / self.goal
-        if method == "max":
-            return max(norm_dist, 0)
-        elif method == "root":
-            return np.power(max(norm_dist, 0), 1 / 3)
-        elif method == "pow":
-            return np.power(max(norm_dist, 0), 3)
-        elif method == "special":
-            if max(norm_dist, 0) == 0:
-                return max(norm_dist, 0)
-            else:
-                return 1 / (1 + (norm_dist / (1 - norm_dist)) ** (-self.beta))
 
 
 class PADMCardinalitySPO(Cardinality):
@@ -1399,7 +1338,7 @@ class PADMCardinalitySPO(Cardinality):
         return np.linalg.norm(w - y, 1)
 
 
-class MaxPADMCardinalitySPO(GoalModel, PADMCardinalitySPO):
+class MaxPADMCardinalitySPO(UtilityModel, PADMCardinalitySPO):
     """This is a crude implementation of PADM - see PADM-Cardinality Constrained Portfolio[73]"""
 
     def __init__(self, *args, **kwargs):
@@ -1755,8 +1694,9 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
         return np.array(arr_l)
 
 
-class MaxPADMCardinalityMPO(GoalModel, PADMCardinalityMPO):
-    def __init__(self, *args, **kwargs):
+class MaxPADMCardinalityMPO(UtilityModel, PADMCardinalityMPO):
+    def __init__(self, gamma_U, *args, **kwargs):
+        self.gamma_U = gamma_U
         super().__init__(*args, **kwargs)
 
     def f(self, y, mu, t, tau_times):
@@ -1768,47 +1708,27 @@ class MaxPADMCardinalityMPO(GoalModel, PADMCardinalityMPO):
 
         for i, tau in enumerate(tau_times):
             if tau != t and self.estimated_index_w:
-                w_index = self.w_index.copy()
                 w_index[:-1] = np.abs(w_index[:-1] + rng.normal(0, 0.01, w_index[:-1].shape))
                 w_index = w_index / np.sum(w_index)
             elif tau != t:
-                temp_w = w_index.mul(self.return_forecast.filter(assets).weight_expr_ahead(t, tau))
+                temp_w = w_index + w_index.mul(self.return_forecast.filter(self.assets).weight_expr_ahead(t, tau))
                 w_index = temp_w / temp_w.sum()
-            # if tau != t and self.estimated_index_w:
-            # w_index = np.abs(self.w_index + rng.normal(0, 1, self.w_index.shape))
-            # w_index = w_index / np.sum(w_index)
             else:
                 w_index = self.w_index.copy()
 
             z = cvx.Variable(w.size)
             wplus = w + z
 
-            alpha = self.get_goal_dist(self.value, method="special")
-
-            # Objective Function
-            ret = (
-                -alpha
-                * (1 / self.gamma_te)
-                * self.return_forecast.filter(self.assets).weight_expr_ahead(t, tau, wplus=wplus, w_index=self.w_index)
+            # Create Objective
+            risk = (
+                self.gamma_te
+                * self.Sigma.filter(self.assets).weight_expr_ahead(t, tau, wplus - w_index, z, self.value)[0]
             )
-
-            # ret = -self.gamma_excess * self.return_forecast.weight_expr_ahead(t, tau, wplus=wplus, w_index=w_index)
-            # ret = self.gamma_te * cvx.quad_form((wplus - w_index), values_in_time(self.Sigma, t))
-
-            if isinstance(self.Sigma, BaseRiskModel):
-                ret += (
-                    (1 - alpha)
-                    * self.gamma_te
-                    * self.Sigma.filter(self.assets).weight_expr_ahead(t, tau, wplus - w_index, z, self.value)[0]
-                )
-            else:
-                Sigma = values_in_time(self.Sigma, t)
-                idx = Sigma.columns.get_indexer(self.assets)
-                Sigma_filt = Sigma.loc[:, self.assets].iloc[idx]
-                ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
+            ret = self.return_forecast.filter(self.assets).weight_expr_ahead(t, tau, wplus)
+            utility = self.gamma_U * self.get_utility(ret * self.value, method="pow")
 
             # l1 penalty term
-            ret += mu * cvx.norm(wplus - y[i], 1)
+            pen = mu * cvx.norm(wplus - y[i], 1)
 
             # assert tracking_term.is_convex()
             assert ret.is_convex()
@@ -1834,7 +1754,7 @@ class MaxPADMCardinalityMPO(GoalModel, PADMCardinalityMPO):
                 assert el.is_dcp()
 
             # obj = cvx.Minimize(tracking_term + sum(costs))
-            obj = cvx.Minimize(ret + sum(costs))
+            obj = cvx.Minimize(risk + pen + sum(costs) - utility)
             prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
             prob_arr.append(prob)
             z_vars.append(z)

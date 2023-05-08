@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "FullSigma",
+    "onlineFullSigma",
     "EmpSigma",
     "SqrtSigma",
     "WorstCaseRisk",
@@ -152,22 +153,45 @@ class FullSigma(FilterAssets, BaseRiskModel):
     def __init__(self, Sigma, conditioning=0, **kwargs):
         self.Sigma = Sigma  # Sigma is either a matrix or a pd.Panel
         self.cond = conditioning
-        try:
-            assert not pd.isnull(Sigma).values.any()
-        except AttributeError:
-            assert not pd.isnull(Sigma).any()
         super().__init__(**kwargs)
 
     def _estimate(self, t, wplus, z, value):
         Sigma = values_in_time(self.Sigma, t)
         idx = Sigma.columns.get_indexer(self.assets)
         Sigma = Sigma.loc[:, self.assets].iloc[idx]
-        Sigma = Sigma + self.cond * np.diag(np.ones(Sigma.shape[0]))
+        Sigma = Sigma + self.cond * np.diag(np.ones(Sigma.shape[0]))  # Shrinkage
         try:
             self.expression = cvx.quad_form(wplus, Sigma)
         except TypeError:
             self.expression = cvx.quad_form(wplus, Sigma.values)
         return self.expression
+
+
+class onlineFullSigma(FullSigma):
+    def __init__(self, returns, lookback, conditioning=0, **kwargs):
+        self.online = True
+        self.returns = returns
+        self.lookback = lookback
+        super().__init__(Sigma=None, conditioning=conditioning, **kwargs)
+
+    def update(self, t):
+        if self.assets is not None:
+            returns = self.returns[self.assets]
+        else:
+            returns = self.returns
+        idx = returns.index.get_indexer([t])[0]
+
+        cov = returns.iloc[max(0,idx - self.lookback) : idx].cov()
+        # check if cov has any np.inf or np.nan or 0.0
+        if (
+            np.isinf(cov).values.any()
+            or np.isnan(cov).values.any()
+            or (cov == 0.0).values.any()
+        ):
+            print("replaced shit")
+            cov = cov.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        is_psd = np.all(np.linalg.eigvals(cov) + self.cond * np.diag(np.ones(cov.shape[0]))  >= 0)
+        self.Sigma = pd.concat({t: cov}, names=["date"]).droplevel(1)
 
 
 class FullSigmaTEConst(BaseRiskModelConst):

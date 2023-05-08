@@ -154,11 +154,19 @@ class MarketSimulator:
             # if t == datetime.strptime("2006-05-10", "%Y-%m-%d"):
             #     print("check time")
             if t in rebalance_on:
-                logging.info("Getting trades at time %s" % t)
+                # Update returns and risk matrices
+                logging.info("Updating Ret dand Risk matrices")
+                # policy.return_forecast.update(t)
+                # policy.Sigma.update(t=t)
+                logging.info(f"Getting trades at time {t}")
                 start = time.time()
                 u = policy.get_trades(h, t)
                 end = time.time()
                 results.log_policy(t, end - start)
+                results.log_data("risk_vals", t, policy.risk_vals)
+                results.log_data("risk_weights", t, policy.risk_weights)
+                results.log_data("utility_vals", t, policy.utility_vals)
+                results.log_data("ret_vals", t, policy.ret_vals)
             else:
                 logging.info(f"{t} is not a rebalancing date")
                 u = pd.Series(index=h.index, data=0.0)
