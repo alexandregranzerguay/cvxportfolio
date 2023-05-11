@@ -181,7 +181,7 @@ class onlineFullSigma(FullSigma):
             returns = self.returns
         idx = returns.index.get_indexer([t])[0]
 
-        cov = returns.iloc[max(0,idx - self.lookback) : idx].cov()
+        cov = returns.iloc[max(0, idx - self.lookback) : idx].cov()
         # check if cov has any np.inf or np.nan or 0.0
         if (
             np.isinf(cov).values.any()
@@ -190,7 +190,9 @@ class onlineFullSigma(FullSigma):
         ):
             print("replaced shit")
             cov = cov.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        is_psd = np.all(np.linalg.eigvals(cov) + self.cond * np.diag(np.ones(cov.shape[0]))  >= 0)
+        is_psd = np.all(
+            np.linalg.eigvals(cov) + self.cond * np.diag(np.ones(cov.shape[0])) >= 0
+        )
         self.Sigma = pd.concat({t: cov}, names=["date"]).droplevel(1)
 
 
@@ -239,7 +241,11 @@ class FullSigmaTEConst(BaseRiskModelConst):
         return self.expression
 
     def _get_index_weights(self, t):
-        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
+        market_cap = (
+            self.float_shares["float_shares"]
+            .multiply(values_in_time(self.index_prices, t))
+            .fillna(0)
+        )
         index_weights = market_cap / market_cap.sum()
         index_weights["Cash"] = 0
         return index_weights
@@ -291,7 +297,11 @@ class FullSigmaTECost(BaseRiskModel):
         return self.expression
 
     def _get_index_weights(self, t):
-        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
+        market_cap = (
+            self.float_shares["float_shares"]
+            .multiply(values_in_time(self.index_prices, t))
+            .fillna(0)
+        )
         index_weights = market_cap / market_cap.sum()
         index_weights["Cash"] = 0
         return index_weights
@@ -362,7 +372,8 @@ class RobustSigma(BaseRiskModel):
     def _estimate(self, t, wplus, z, value):
         self.expression = (
             self.gamma_risk * cvx.quad_form(wplus, values_in_time(self.Sigma, t))
-            + values_in_time(self.epsilon, t) * (cvx.abs(wplus).T @ np.diag(values_in_time(self.Sigma, t))) ** 2
+            + values_in_time(self.epsilon, t)
+            * (cvx.abs(wplus).T @ np.diag(values_in_time(self.Sigma, t))) ** 2
         )
 
         return self.expression

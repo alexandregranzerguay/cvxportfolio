@@ -98,7 +98,10 @@ class MaxTrade(BaseConstraint):
           z: trade weights
           v: portfolio value
         """
-        return cvx.abs(z[:-1]) * v <= np.array(values_in_time(self.ADVs, t)) * self.max_fraction
+        return (
+            cvx.abs(z[:-1]) * v
+            <= np.array(values_in_time(self.ADVs, t)) * self.max_fraction
+        )
 
 
 class LongOnly(FilterAssets, BaseConstraint):
@@ -254,7 +257,9 @@ class FactorMaxLimit(BaseConstraint):
             t: time
             w_plus: holdings
         """
-        return values_in_time(self.factor_exposure, t).T @ w_plus[:-1] <= values_in_time(self.limit, t)
+        return values_in_time(self.factor_exposure, t).T @ w_plus[
+            :-1
+        ] <= values_in_time(self.limit, t)
 
 
 class FactorMinLimit(BaseConstraint):
@@ -278,7 +283,9 @@ class FactorMinLimit(BaseConstraint):
             t: time
             w_plus: holdings
         """
-        return values_in_time(self.factor_exposure, t).T @ w_plus[:-1] >= values_in_time(self.limit, t)
+        return values_in_time(self.factor_exposure, t).T @ w_plus[
+            :-1
+        ] >= values_in_time(self.limit, t)
 
 
 class FixedAlpha(BaseConstraint):
@@ -296,7 +303,9 @@ class FixedAlpha(BaseConstraint):
         self.alpha_target = alpha_target
 
     def _weight_expr(self, t, w_plus, z, v):
-        return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == values_in_time(self.alpha_target, t)
+        return values_in_time(self.return_forecast, t).T @ w_plus[
+            :-1
+        ] == values_in_time(self.alpha_target, t)
 
 
 # class Alpha(BaseConstraint):
@@ -383,7 +392,11 @@ class IndexUpdater:
 
     def _get_index_weights(self, t, shares=None):
         # if shares is None:
-        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
+        market_cap = (
+            self.float_shares["float_shares"]
+            .multiply(values_in_time(self.index_prices, t))
+            .fillna(0)
+        )
         index_weights = market_cap / market_cap.sum()
         index_weights["Cash"] = 0
         # else:
@@ -393,38 +406,10 @@ class IndexUpdater:
 
 
 class TrackingErrorMax(FilterAssets, BaseConstraint):
-    def __init__(self, Sigma, limit, index_weights, **kwargs):
-        self.Sigma = Sigma  # Sigma is either a matrix or a pd.Panel
+    def __init__(self, limit, **kwargs):
         self.limit = limit
-        self.index_weights = index_weights
-        self.assets = Sigma.columns
         self.cond = 1
-        # self.index_prices = index_prices
-        try:
-            assert not pd.isnull(Sigma).values.any()
-        except AttributeError:
-            assert not pd.isnull(Sigma).any()
         super().__init__(**kwargs)
 
-        # if use_updater:
-        #     self._init_updater(index_prices=index_prices, sigma=Sigma, **kwargs)
-
-    def weight_expr(self, t, w_plus, z, value):
-        # self.w_bench = self._get_index_weights(t)
-        self.w_bench = self.index_weights.loc[t]
-        self.w_bench["cash"] = 0
-        self.w_bench = self.w_bench[self.assets]
-        self.expression = self._estimate(t, w_plus - self.w_bench, z, value)
-        # self.expression = self.Sigma.filter(self.assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
-        return self.expression <= values_in_time(self.limit, t)
-
-    def _estimate(self, t, wplus, z, value):
-        Sigma = values_in_time(self.Sigma, t)
-        idx = Sigma.columns.get_indexer(self.assets)
-        Sigma = Sigma.loc[:, self.assets].iloc[idx]
-        Sigma = Sigma + self.cond * np.diag(np.ones(Sigma.shape[0]))
-        try:
-            self.expression = cvx.quad_form(wplus, Sigma)
-        except TypeError:
-            self.expression = cvx.quad_form(wplus, Sigma.values)
-        return self.expression
+    def get_limit(self, t, track):
+        return track <= values_in_time(self.limit, t)
