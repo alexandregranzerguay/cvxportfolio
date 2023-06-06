@@ -38,6 +38,7 @@ __all__ = [
     "FixedAlpha",
     "Cardinality",
     "TrackingErrorMax",
+    "TurnoverLimit",
 ]
 
 
@@ -98,10 +99,7 @@ class MaxTrade(BaseConstraint):
           z: trade weights
           v: portfolio value
         """
-        return (
-            cvx.abs(z[:-1]) * v
-            <= np.array(values_in_time(self.ADVs, t)) * self.max_fraction
-        )
+        return cvx.abs(z[:-1]) * v <= np.array(values_in_time(self.ADVs, t)) * self.max_fraction
 
 
 class LongOnly(FilterAssets, BaseConstraint):
@@ -257,9 +255,7 @@ class FactorMaxLimit(BaseConstraint):
             t: time
             w_plus: holdings
         """
-        return values_in_time(self.factor_exposure, t).T @ w_plus[
-            :-1
-        ] <= values_in_time(self.limit, t)
+        return values_in_time(self.factor_exposure, t).T @ w_plus[:-1] <= values_in_time(self.limit, t)
 
 
 class FactorMinLimit(BaseConstraint):
@@ -283,9 +279,7 @@ class FactorMinLimit(BaseConstraint):
             t: time
             w_plus: holdings
         """
-        return values_in_time(self.factor_exposure, t).T @ w_plus[
-            :-1
-        ] >= values_in_time(self.limit, t)
+        return values_in_time(self.factor_exposure, t).T @ w_plus[:-1] >= values_in_time(self.limit, t)
 
 
 class FixedAlpha(BaseConstraint):
@@ -303,9 +297,7 @@ class FixedAlpha(BaseConstraint):
         self.alpha_target = alpha_target
 
     def _weight_expr(self, t, w_plus, z, v):
-        return values_in_time(self.return_forecast, t).T @ w_plus[
-            :-1
-        ] == values_in_time(self.alpha_target, t)
+        return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == values_in_time(self.alpha_target, t)
 
 
 # class Alpha(BaseConstraint):
@@ -392,11 +384,7 @@ class IndexUpdater:
 
     def _get_index_weights(self, t, shares=None):
         # if shares is None:
-        market_cap = (
-            self.float_shares["float_shares"]
-            .multiply(values_in_time(self.index_prices, t))
-            .fillna(0)
-        )
+        market_cap = self.float_shares["float_shares"].multiply(values_in_time(self.index_prices, t)).fillna(0)
         index_weights = market_cap / market_cap.sum()
         index_weights["Cash"] = 0
         # else:
@@ -413,3 +401,22 @@ class TrackingErrorMax(FilterAssets, BaseConstraint):
 
     def get_limit(self, t, track):
         return track <= values_in_time(self.limit, t)
+
+
+class TurnoverLimit(FilterAssets, BaseConstraint):
+    """Turnover limit as a fraction of the portfolio value.
+
+    See page 37 of the book.
+
+    :param delta: constant or changing in time turnover limit
+    :type delta: float or pd.Series
+    """
+
+    def __init__(self, delta, half_spread=None, **kwargs):
+        self.delta = delta
+        self.half_spread = half_spread
+        super().__init__(asset_filter=False, **kwargs)
+
+    def _weight_expr(self, t, w_plus, z, v):
+        delta = values_in_time(self.delta, t)
+        return 0.5 * cvx.norm1(z) * self.half_spread <= delta * self.half_spread

@@ -140,7 +140,7 @@ class TcostModel(BaseCost):
       power: The nonlinear tcost power.
     """
 
-    def __init__(self, half_spread, nonlin_coeff=0.0, sigma=0.0, volume=1.0, power=1.5):
+    def __init__(self, half_spread, nonlin_coeff=0.0, sigma=0.0, volume=1.0, power=1.5, goal=None, include_cash=False):
         null_checker(half_spread)
         self.half_spread = half_spread
         # null_checker(sigma)
@@ -151,6 +151,8 @@ class TcostModel(BaseCost):
         self.nonlin_coeff = nonlin_coeff
         null_checker(power)
         self.power = power
+        self.goal = goal
+        self.include_cash = include_cash
         super(TcostModel, self).__init__()
 
     def _estimate(self, t, w_plus, z, value):
@@ -172,7 +174,8 @@ class TcostModel(BaseCost):
                 z = z[z.index != self.cash_key]
                 z = z.values
             except AttributeError:
-                z = z[:-1]  # TODO fix when cvxpy pandas ready
+                if not self.include_cash:
+                    z = z[:-1]  # TODO fix when cvxpy pandas ready
 
         constr = []
 
@@ -193,6 +196,13 @@ class TcostModel(BaseCost):
             # no trade on specific tickers
             constr += [z[second_term.index.get_loc(tick)] == 0 for tick in no_trade]
 
+        # TODO: make a goal module
+        if self.goal is not None:
+            if value < self.goal:
+                gamma_trade = 2e1
+            else:
+                gamma_trade = 1e-7
+
         try:
             self.expression = cvx.multiply(values_in_time(self.half_spread, t), cvx.abs(z))
         except TypeError:
@@ -202,17 +212,19 @@ class TcostModel(BaseCost):
         except TypeError:
             self.expression += cvx.multiply(second_term.values, cvx.abs(z) ** self.power)
 
+        # return gamma_trade * (cvx.sum(self.expression) - 0.2), constr
         return cvx.sum(self.expression), constr
 
     def value_expr(self, t, h_plus, u):
-
-        u_nc = u.iloc[:-1]
+        if self.include_cash:
+            u_nc = u
+        else:
+            u_nc = u.iloc[:-1]
         self.tmp_tcosts = np.abs(u_nc) * values_in_time(self.half_spread, t) + values_in_time(
             self.nonlin_coeff, t
         ) * values_in_time(self.sigma, t) * np.abs(u_nc) ** self.power / (
             values_in_time(self.volume, t) ** (self.power - 1)
         )
-
         return self.tmp_tcosts.sum()
 
     def optimization_log(self, t):

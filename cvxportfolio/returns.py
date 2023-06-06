@@ -231,10 +231,12 @@ class onlineMPOReturnsForecast(MPOReturnsForecast):
         mvn = rng.multivariate_normal(mu, cov, size=(sample_size, num_days))
         self.mvn_avg = pd.DataFrame(index=index_list, data=mvn.mean(axis=0), columns=self.ret.columns)
 
-        for tau in periods:
-            # cumulative return for each rebal period
-            self.ret_est[(periods[0], tau)] = ((self.mvn_avg.loc[periods[0] : tau] + 1).cumprod() - 1).iloc[-1]
-    
+        for i, tau in enumerate(periods):
+            # cumulative return for each rebal period (previous tau to current tau)
+            if i == 0:
+                self.ret_est[(periods[0], tau)] = ((self.mvn_avg.loc[periods[0] : tau] + 1).cumprod() - 1).iloc[-1]
+            else:
+                self.ret_est[(periods[0], tau)] = ((self.mvn_avg.loc[periods[i - 1] : tau] + 1).cumprod() - 1).iloc[-1]
 
 
 class MultipleReturnsForecasts(BaseReturnsModel):
