@@ -45,8 +45,9 @@ __all__ = [
 class BaseConstraint(object):
     __metaclass__ = ABCMeta
 
-    def __init__(self, **kwargs):
+    def __init__(self, track_dual=False, **kwargs):
         self.w_bench = kwargs.pop("w_bench", 0.0)
+        self.duals = [] if track_dual else None
 
     def weight_expr(self, t, w_plus, z, v):
         """Returns a list of trade constraints.
@@ -58,12 +59,21 @@ class BaseConstraint(object):
           v: portfolio value
         """
         if w_plus is None:
-            return self._weight_expr(t, None, z, v)
-        return self._weight_expr(t, w_plus - self.w_bench, z, v)
+            return self._track_duals(self._weight_expr(t, None, z, v))
+        return self._track_duals(self._weight_expr(t, w_plus - self.w_bench, z, v))
 
     @abstractmethod
     def _weight_expr(self, t, w_plus, z, v):
         pass
+
+    def _track_duals(self, expr):
+        ## TODO: Test this code!
+        if self.duals is not None:
+            if isinstance(expr, list):
+                self.duals += [con.dual_value for con in expr]
+            else:
+                self.duals.append(expr.dual_value)
+        return expr
 
 
 class FilterAssets:

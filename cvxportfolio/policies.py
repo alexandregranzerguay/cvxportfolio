@@ -480,51 +480,6 @@ class PosTrackingSinglePeriodOpt(BasePolicy):
             return self._nulltrade(portfolio)
 
 
-class UtilityModel:
-    def __init__(self, goal=None, beta=1 / 6, method=None, *args, **kwargs):
-        self.goal = goal
-        self.method = method
-        super().__init__(*args, **kwargs)
-
-    def get_utility(self, portf_val, beta=None):
-        if self.goal is None:
-            return 0
-
-        norm_dist = portf_val / self.goal
-        if self.method == "max":
-            return max(norm_dist, 0)
-        elif self.method == "pow":
-            return norm_dist**beta
-        elif self.method == "exp":
-            # return cvx.exp(self.beta * norm_dist)
-            return cvx.exp(beta * (norm_dist)) - 1
-        elif self.method == "log":
-            return cvx.log((portf_val / self.goal))
-        elif self.method == "special":
-            if max(norm_dist, 0) == 0:
-                return max(norm_dist, 0)
-            else:
-                return 1 / (1 + (norm_dist / (1 - norm_dist)) ** (-beta))
-
-    def get_multiplier(self, portf_val):
-        if self.goal is None:
-            return 0
-
-        norm_dist = portf_val / self.goal
-        if self.method == "max":
-            return norm_dist
-        elif self.method == "pow":
-            return np.maximum(norm_dist**2, 0)
-        elif self.method == "sqrt":
-            return np.maximum(np.sqrt(norm_dist), 0)
-        elif self.method == "exp":
-            raise NotImplementedError
-        elif self.method == "log":
-            raise NotImplementedError
-        elif self.method == "special":
-            raise NotImplementedError
-
-
 class QuadTrackingSPO(BasePolicy):
     """Single-period optimization policy.
 
@@ -842,13 +797,74 @@ class QuadTrackingMPO(QuadTrackingSPO):
         return np.array(arr_l)
 
 
+class UtilityModel:
+    def __init__(
+        self,
+        goal: int,
+        gamma_sp: float,
+        gamma_sf: float,
+        *args,
+        **kwargs,
+    ):
+        self.goal = goal
+        self.gamma_sp = gamma_sp
+        self.gamma_sf = gamma_sf
+        super().__init__(*args, **kwargs)
+
+    # def get_utility(self, portf_val, beta=None):
+    # if self.goal is None:
+    #     return 0
+
+    # norm_dist = portf_val / self.goal
+    # if self.method == "max":
+    #     return max(norm_dist, 0)
+    # elif self.method == "pow":
+    #     return norm_dist**beta
+    # elif self.method == "exp":
+    #     # return cvx.exp(self.beta * norm_dist)
+    #     return cvx.exp(beta * (norm_dist)) - 1
+    # elif self.method == "log":
+    #     return cvx.log((portf_val / self.goal))
+    # elif self.method == "special":
+    #     if max(norm_dist, 0) == 0:
+    #         return max(norm_dist, 0)
+    #     else:
+    #         return 1 / (1 + (norm_dist / (1 - norm_dist)) ** (-beta))
+    def get_utility(self, wealth_plus):
+        # sp = self.gamma_sp * cvx.pos(wealth_plus - self.goal)
+        # sp2 = 0
+        # sp = self.gamma_sp * ((wealth_plus - self.goal) - sum(costs))
+        sp = self.gamma_sp * ((wealth_plus - self.goal))
+        # sp = 0
+        # sf = -self.gamma_sf * cvx.neg(wealth_plus - self.goal)
+        # sf = self.gamma_sf * ((wealth_plus - self.goal) - sum(costs))
+        sf = self.gamma_sf * ((wealth_plus - self.goal))
+        return cvx.minimum(sp, sf)
+
+    def get_multiplier(self, portf_val):
+        if self.goal is None:
+            return 0
+
+        norm_dist = portf_val / self.goal
+        if self.method == "max":
+            return norm_dist
+        elif self.method == "pow":
+            return np.maximum(norm_dist**2, 0)
+        elif self.method == "sqrt":
+            return np.maximum(np.sqrt(norm_dist), 0)
+        elif self.method == "exp":
+            raise NotImplementedError
+        elif self.method == "log":
+            raise NotImplementedError
+        elif self.method == "special":
+            raise NotImplementedError
+
+
 class GoalQuadTrackingMPO(UtilityModel, QuadTrackingSPO):
     def __init__(
         self,
         trading_times: list,
         terminal_weights: pd.DataFrame,
-        gamma_sp: float,
-        gamma_sf: float,
         gamma_risk: float,
         lookahead_periods: int = None,
         warm_start_w=None,
@@ -875,8 +891,6 @@ class GoalQuadTrackingMPO(UtilityModel, QuadTrackingSPO):
         self.estimated_index_w = False
         self.warm_start_w = warm_start_w
         self.te_limit = te_limit
-        self.gamma_sp = gamma_sp
-        self.gamma_sf = gamma_sf
         self.gamma_risk = gamma_risk
 
         super().__init__(*args, **kwargs)
@@ -926,6 +940,7 @@ class GoalQuadTrackingMPO(UtilityModel, QuadTrackingSPO):
         trading_periods = self.trading_times[
             self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
         ]
+
         for i, tau in enumerate(trading_periods):
             if tau != t:
                 if self.estimated_index_w:
@@ -963,41 +978,17 @@ class GoalQuadTrackingMPO(UtilityModel, QuadTrackingSPO):
             for el in constraints:
                 assert el.is_dcp()
 
-            ################## Duality - Utility ##################
-            # # y = cvx.Variable(boolean=True)
-            # # obj = cvx.Minimize(risk - y)
-            # obj = cvx.Minimize(risk)
-            # M = 1e15
-            # # rhs = (wealth_plus - self.goal) / self.goal
-            # # lhs = (1 - y) * M
-            # # constraints += [(1 - y) * M >= (wealth_plus - self.goal) / self.goal]
-            # # SP:
-            # constraints += [ret >= 0.002]
-            # # SF:
-            # # constraints += [ret >= 0.05 * y]
-            # u = ret
+            u = self.get_utility(wealth_plus)
+            gamma_time = self.get_gamma_time(tau)
+            gamma_time = 0
 
-            #######################################################
-
-            ################## Other ##################
-            # sp = self.gamma_sp * cvx.pos(wealth_plus - self.goal)
-            # sp2 = 0
-            # sp = self.gamma_sp * ((wealth_plus - self.goal) - sum(costs))
-            sp = self.gamma_sp * ((wealth_plus - self.goal))
-            # sp = 0
-            # sf = -self.gamma_sf * cvx.neg(wealth_plus - self.goal)
-            # sf = self.gamma_sf * ((wealth_plus - self.goal) - sum(costs))
-            sf = self.gamma_sf * ((wealth_plus - self.goal))
-            u = cvx.minimum(sp, sf)
-            # u = sp
-            # u = cvx.Variable()
-            # constraints += [u <= sp, u <= sf]
-            # utility = sp
             gamma_trade = 0.5e3 if value < self.goal else 1e-1
-            # obj = cvx.Maximize(u - self.gamma_risk * risk)
-            # obj = cvx.Maximize(u - self.gamma_risk * (risk - 0.0002))
+            gamma_trade = 0
+
             obj = cvx.Maximize(
-                u - self.gamma_risk * risk - gamma_trade * (0.5 * sum(costs) - 0.1 * self.costs[0].half_spread)
+                u
+                - self.gamma_risk * ((1 - gamma_time) * risk + gamma_time * track)
+                - gamma_trade * (0.5 * sum(costs) - 0.1 * self.costs[0].half_spread)
             )
 
             try:
@@ -1006,11 +997,8 @@ class GoalQuadTrackingMPO(UtilityModel, QuadTrackingSPO):
                 cost_penalty = gamma_trade * (0.5 * sum(costs) - 0.1 * self.costs[0].half_spread)
             except:
                 sum_cost = 0
-            # obj = cvx.Maximize(u - self.gamma_risk * risk)
 
-            ##########################################
-
-            risk_vars.append(self.gamma_risk * risk)
+            risk_vars.append(risk)
             # ret_vars.append(utility)
             ret_vars.append(u)
             # obj = cvx.Minimize(track + sum(costs))
@@ -1041,41 +1029,14 @@ class GoalQuadTrackingMPO(UtilityModel, QuadTrackingSPO):
         self.prob = sum(prob_arr)
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
-            # print(prob.constraints[3].dual_value)
-            print(f"Turnover Const: {turnover_const.value}")
-            print(f"Penalty value: {cost_penalty.value}")
-            print(f"Turnover Propotion: {0.5*sum(abs(z_vars[0].value))}")
-            print(f"Wealth value: {wealth_plus.value}, Goal: {self.goal}")
+            # print(f"Turnover Const: {turnover_const.value}")
+            # print(f"Penalty value: {cost_penalty.value}")
+            # print(f"Turnover Propotion: {0.5*sum(abs(z_vars[0].value))}")
+            # print(f"Wealth value: {wealth_plus.value}, Goal: {self.goal}")
             # pd.Series(index=portfolio.index, data=wplus.value).to_csv("primal.csv")
             if "unbounded" in self.prob.status:
                 self.prob.solve(reoptimize=True)
 
-            # temp3 = self.index_weights.loc[t]
-            ####
-            # def re_opt(dual, constraints=None):
-            #     z = cvx.Variable(*w.shape)
-            #     wplus = w + z
-            #     ret = self.return_forecast.filter(assets).weight_expr_ahead(t, tau, wplus)
-            #     risk = self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus, z, value)[0]
-            #     obj = cvx.Minimize(risk + dual * (0.002 - ret))
-            #     lag = dual * (0.002 - ret)
-            #     # obj = cvx.Minimize(risk - prob.constraints[3].dual_value * ret)
-            #     constraints = []
-            #     constraints += [LongOnly().filter(assets).weight_expr(t, wplus, z, value)]
-            #     constraints += [LongCash().filter(assets).weight_expr(t, wplus, z, value)]
-            #     if constraints is None:
-            #         prob = cvx.Problem(obj, [cvx.sum(z) == 0])
-            #     else:
-            #         prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
-            #     prob.solve(solver=self.solver, **self.solver_opts)
-            #     print(prob.value)
-            #     pd.Series(index=portfolio.index, data=wplus.value).to_csv("lagrangian.csv")
-            #     return risk.value
-
-            # if prob.status == "optimal":
-            #     print(self.prob.value)
-            #     val = re_opt(prob.constraints[3].dual_value)
-            ####
             self.beta = beta_vars[0]
             self.risk_vals = risk_vars[0].value
             # self.utility_vals = utility_vars[0].value
@@ -1107,6 +1068,10 @@ class GoalQuadTrackingMPO(UtilityModel, QuadTrackingSPO):
     def optToArr(self, l):
         arr_l = [el.value for el in l]
         return np.array(arr_l)
+
+    def get_gamma_time(self, t):
+        days_left = np.busday_count(t.date(), self.end_dt)
+        return days_left / self.investment_horizon
 
 
 class Cardinality(BasePolicy):

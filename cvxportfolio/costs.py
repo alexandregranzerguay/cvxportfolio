@@ -196,13 +196,6 @@ class TcostModel(BaseCost):
             # no trade on specific tickers
             constr += [z[second_term.index.get_loc(tick)] == 0 for tick in no_trade]
 
-        # TODO: make a goal module
-        if self.goal is not None:
-            if value < self.goal:
-                gamma_trade = 2e1
-            else:
-                gamma_trade = 1e-7
-
         try:
             self.expression = cvx.multiply(values_in_time(self.half_spread, t), cvx.abs(z))
         except TypeError:
