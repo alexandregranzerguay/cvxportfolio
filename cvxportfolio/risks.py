@@ -25,6 +25,8 @@ from .costs import BaseCost
 from .constraints import BaseConstraint
 from .utils import values_in_time
 
+from cvxpy.atoms.affine.wraps import psd_wrap
+
 logger = logging.getLogger(__name__)
 
 
@@ -160,11 +162,18 @@ class FullSigma(FilterAssets, BaseRiskModel):
         idx = Sigma.columns.get_indexer(self.assets)
         Sigma = Sigma.loc[:, self.assets].iloc[idx]
         Sigma = Sigma + self.cond * np.diag(np.ones(Sigma.shape[0]))  # Shrinkage
+        Sigma = psd_wrap(Sigma)  # Assert PSD
         try:
             self.expression = cvx.quad_form(wplus, Sigma)
         except TypeError:
             self.expression = cvx.quad_form(wplus, Sigma.values)
         return self.expression
+
+    def get_sigma(self, t):
+        Sigma = values_in_time(self.Sigma, t)
+        idx = Sigma.columns.get_indexer(self.assets)
+        Sigma = Sigma.loc[:, self.assets].iloc[idx]
+        return Sigma + self.cond * np.diag(np.ones(Sigma.shape[0]))
 
 
 class onlineFullSigma(FullSigma):
@@ -184,9 +193,8 @@ class onlineFullSigma(FullSigma):
         cov = returns.iloc[max(0, idx - self.lookback) : idx].cov()
         # check if cov has any np.inf or np.nan or 0.0
         if np.isinf(cov).values.any() or np.isnan(cov).values.any() or (cov == 0.0).values.any():
-            print("replaced shit")
             cov = cov.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        is_psd = np.all(np.linalg.eigvals(cov) + self.cond * np.diag(np.ones(cov.shape[0])) >= 0)
+        # is_psd = np.all(np.linalg.eigvals(cov) + self.cond * np.diag(np.ones(cov.shape[0])) >= 0)
         self.Sigma = pd.concat({t: cov}, names=["date"]).droplevel(1)
 
 

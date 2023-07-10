@@ -59,7 +59,8 @@ class BlackLittermanModel(FilterAssets, BaseReturnsModel):
 
     # Calculates portfolio mean return
     def port_mean(self, W, R):
-        return np.sum(R * W)
+        # return np.sum(R * W)
+        return np.dot(W, R)
 
     # Calculates portfolio variance of returns
     def port_var(self, W, C):
@@ -82,21 +83,18 @@ class BlackLittermanModel(FilterAssets, BaseReturnsModel):
         - excess returns
         """
         # index = returns.name
-        cov = values_in_time(self.covariance_matrix, t)
+        cov = self.covariance_matrix.get_sigma(t)
 
         # Filter covariance matrix:
-        idx = cov.columns.get_indexer(self.assets)
-        cov = cov.loc[:, self.assets].iloc[idx]
+        # idx = cov.columns.get_indexer(self.assets)
+        # cov = cov.loc[:, self.assets].iloc[idx]
 
         # Calculate portfolio historical return and variance
         mean, var = self.port_mean_var(weights, returns, cov)
 
         lmb = (mean - self.rf_rate) / var  # Calculate risk aversion
         Pi = np.dot(np.dot(lmb, cov), weights)  # Calculate equilibrium excess returns
-        # excess_ret = Pi + rf #TODO: Check that this isn't double counting
-        excess_ret = Pi
-        # print(type(excess_ret))
-        return excess_ret
+        return pd.Series(data=Pi, index=returns.index)
 
 
 class ReturnsForecast(BlackLittermanModel):
@@ -138,15 +136,13 @@ class ReturnsForecast(BlackLittermanModel):
             alpha = returns
             return alpha @ wplus
         elif wplus is None:
-            alpha = returns
-            # assert (isinstance(alpha, float))
-            return alpha
+            return returns
         else:
             alpha = cvx.multiply(returns, wplus)
             alpha -= cvx.multiply(values_in_time(self.delta, t), cvx.abs(wplus))
             return cvx.sum(alpha)
 
-    def weight_expr_ahead(self, t, tau, wplus=None):
+    def weight_expr_ahead(self, t, tau, wplus=None, w_index=None):
         """Returns the estimate at time t of alpha at time tau.
 
         Args:
@@ -158,7 +154,7 @@ class ReturnsForecast(BlackLittermanModel):
           An expression for the alpha.
         """
 
-        alpha = self.weight_expr(t, wplus)
+        alpha = self.weight_expr(t, wplus=wplus, w_index=w_index)
         if tau > t and self.gamma_decay is not None:
             alpha *= (tau - t).days ** (-self.gamma_decay)
         return alpha
@@ -175,7 +171,7 @@ class MPOReturnsForecast(BlackLittermanModel):
         self.ret_est = ret_est
         super().__init__(**kwargs)
 
-    def weight_expr_ahead(self, t, tau, wplus=None, w_index=None):
+    def weight_expr_ahead(self, t, tau, wplus=None, w_index=None, excess=False):
         """Returns the estimate at time t of alpha at time tau.
 
         Args:
@@ -186,17 +182,18 @@ class MPOReturnsForecast(BlackLittermanModel):
         Returns:
             An expression for the alpha.
         """
+        if excess:
+            assert w_index is not None
+            wplus = wplus - w_index
         if self.ret_est is None:
             raise ValueError("Return estimates were never generated or assigned")
         if wplus is None:
             return self.ret_est[(t, tau)][self.assets]
-        elif w_index is None:
+        elif w_index is None or self.covariance_matrix is None:
             return self.ret_est[(t, tau)][self.assets].values.T @ wplus
-        elif self.covariance_matrix is None:
-            return self.ret_est[(t, tau)][self.assets].values.T @ (wplus - w_index)
         else:
             alpha = self.get_BL(self.ret_est[(t, tau)][self.assets], w_index, t)
-            return alpha @ (wplus - w_index)
+            return alpha.values.T @ (wplus)
 
 
 class onlineMPOReturnsForecast(MPOReturnsForecast):

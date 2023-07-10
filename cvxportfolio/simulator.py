@@ -26,6 +26,7 @@ import pandas as pd
 import cvxpy as cvx
 
 from tqdm import tqdm
+import tqdm.notebook as tq
 
 from .returns import MultipleReturnsForecasts
 
@@ -53,9 +54,7 @@ class MarketSimulator:
         """Provide market returns object and cost objects."""
         self.market_returns = market_returns
         if market_volumes is not None:
-            self.market_volumes = market_volumes[
-                market_volumes.columns.difference([cash_key])
-            ]
+            self.market_volumes = market_volumes[market_volumes.columns.difference([cash_key])]
         else:
             self.market_volumes = None
         self.prices = prices
@@ -87,9 +86,7 @@ class MarketSimulator:
             # don't trade if volume is null
             null_trades = self.market_volumes.columns[self.market_volumes.loc[t] == 0]
             if len(null_trades):
-                logging.info(
-                    "No trade condition for stocks %s on %s" % (null_trades, t)
-                )
+                logging.info("No trade condition for stocks %s on %s" % (null_trades, t))
                 u.loc[null_trades] = 0.0
 
         hplus = h + u
@@ -160,20 +157,19 @@ class MarketSimulator:
             simulator=self,
         )
         h = initial_portfolio
+        # get the index from h without the cash key
+        assets = h.index[h.index != self.cash_key]
 
         simulation_times = self.market_returns.index[
-            (self.market_returns.index >= start_time)
-            & (self.market_returns.index <= end_time)
+            (self.market_returns.index >= start_time) & (self.market_returns.index <= end_time)
         ]
-        logging.info(
-            "Backtest started, from %s to %s"
-            % (simulation_times[0], simulation_times[-1])
-        )
+        logging.info(f"Backtest started, from {simulation_times[0]} to {simulation_times[-1]}")
 
         if rebalance_on is None:
             rebalance_on = simulation_times
 
-        for t in tqdm(simulation_times, position=tqdm_pos):
+        # for t in tqdm(simulation_times, position=tqdm_pos):
+        for t in tq.tqdm(simulation_times, position=tqdm_pos):
             # # Used for debugging
             # if t == datetime.strptime("2006-05-10", "%Y-%m-%d"):
             #     print("check time")
@@ -185,24 +181,21 @@ class MarketSimulator:
                 logging.info(f"Getting trades at time {t}")
                 start = time.time()
                 u = policy.get_trades(h, t)
+                assets = u.index[u.index != self.cash_key]
                 end = time.time()
                 results.log_policy(t, end - start)
-                results.log_data("risk_vals", t, policy.risk_vals)
-                results.log_data("beta", t, policy.beta)
+                # results.log_data("ret_vals", t, policy.ret_val)
+                # results.log_data("track_vals", t, policy.track_val)
+                # results.log_data("beta", t, policy.beta)
                 # results.log_data("utility_vals", t, policy.utility_vals)
-                results.log_data("ret_vals", t, policy.ret_vals)
+                # results.log_data("ret_vals", t, policy.ret_val)
             else:
                 logging.info(f"{t} is not a rebalancing date")
                 u = pd.Series(index=h.index, data=0.0)
-
-            if "index_weights" in policy.__dict__:
-                try:
-                    results.log_data("w_index", t, policy.index_weights.loc[t])
-                except:
-                    pass
+                results.log_data("ret_vals", t, 0)
 
             assert not pd.isnull(u).any()
-            logging.info("Propagating portfolio at time %s" % t)
+            logging.info(f"Propagating portfolio at time {t}")
             start = time.time()
             h, u = self.propagate(h, u, t)
             end = time.time()
@@ -216,21 +209,38 @@ class MarketSimulator:
                 exec_time=end - start,
             )
 
-            # Reporting
+            if "index_weights" in policy.__dict__:
+                try:
+                    w_index = policy.index_weights.loc[t][assets].to_numpy().reshape(-1, 1)
+                    sigma = values_in_time(policy.Sigma.Sigma, t)
+                    idx = sigma.columns.get_indexer(assets)
+                    sigma = sigma.loc[:, assets].iloc[idx].to_numpy()
+                    h_num = h[assets].to_numpy().reshape(-1, 1)
+                    w = h_num / h_num.sum()
+                    real_track = (w - w_index).T @ sigma @ (w - w_index)
+                    real_risk = w.T @ sigma @ w
+
+                    # Reporting
+                    results.log_data("track_vals", t, real_track[0])
+                    results.log_data("risk_vals", t, real_risk[0])
+                    results.log_data("w_index", t, policy.index_weights.loc[t])
+                    results.log_data("w_dist", t, np.abs(self.w_plus - policy.index_weights.loc[t]))
+                except Exception as e:
+                    print(f"Error in reporting: {e}")
+            else:
+                null_vec = pd.Series(data=0.0, index=u.index)
+                results.log_data("w_index", t, null_vec)
+                results.log_data("track_vals", t, null_vec.to_numpy())
+                results.log_data("risk_vals", t, null_vec.to_numpy())
             try:
                 results.log_data("te", t, policy.te)
-            except:
+            except Exception:
                 results.log_data("te", t, 0)
-            results.log_data(
-                "w_dist", t, np.abs(self.w_plus - policy.index_weights.loc[t])
-            )
+
             results.log_data("w_plus", t, self.w_plus)
             results.log_data("market_returns", t, self.market_returns.loc[t])
 
-        logging.info(
-            "Backtest ended, from %s to %s"
-            % (simulation_times[0], simulation_times[-1])
-        )
+        logging.info(f"Backtest ended, from {simulation_times[0]} to {simulation_times[-1]}")
         return results
 
     def run_multiple_backtest(
@@ -273,9 +283,7 @@ class MarketSimulator:
         # TODO fix
         initial_portf = copy.copy(results.h.loc[time])
         all_times = results.h.index
-        alt_results = self.run_multiple_backtest(
-            initial_portf, time, all_times[-1], alt_policies, parallel
-        )
+        alt_results = self.run_multiple_backtest(initial_portf, time, all_times[-1], alt_policies, parallel)
         for idx, alt_result in enumerate(alt_results):
             alt_result.h.loc[time] = results.h.loc[time]
             alt_result.h.sort_index(axis=0, inplace=True)
@@ -286,15 +294,11 @@ class MarketSimulator:
         """Compute matrix of perturbed weights given initial weights."""
         perturb_weights_matrix = np.zeros((len(initial_weights), len(initial_weights)))
         for i in range(len(initial_weights)):
-            perturb_weights_matrix[i, :] = initial_weights / (
-                1 - delta * initial_weights[i]
-            )
+            perturb_weights_matrix[i, :] = initial_weights / (1 - delta * initial_weights[i])
             perturb_weights_matrix[i, i] = (1 - delta) * initial_weights[i]
         return perturb_weights_matrix
 
-    def attribute(
-        self, true_results, policy, selector=None, delta=1, fit="linear", parallel=True
-    ):
+    def attribute(self, true_results, policy, selector=None, delta=1, fit="linear", parallel=True):
         """Attributes returns over a period to individual alpha sources.
 
         Args:
@@ -324,15 +328,11 @@ class MarketSimulator:
         perturb_pols = []
         for idx in range(len(alpha_sources)):
             new_pol = copy.copy(policy)
-            new_pol.return_forecast = MultipleReturnsForecasts(
-                alpha_sources, Wmat[idx, :]
-            )
+            new_pol.return_forecast = MultipleReturnsForecasts(alpha_sources, Wmat[idx, :])
             perturb_pols.append(new_pol)
         # Simulate
         p0 = true_results.initial_portfolio
-        alt_results = self.run_multiple_backtest(
-            p0, times[0], times[-1], perturb_pols, parallel=parallel
-        )
+        alt_results = self.run_multiple_backtest(p0, times[0], times[-1], perturb_pols, parallel=parallel)
         # Attribute.
         true_arr = selector(true_results).values
         attr_times = selector(true_results).index
@@ -357,9 +357,7 @@ class MarketSimulator:
             data=Pmat.value.T * wmask,
         )
         data["residual"] = true_arr - np.asarray((weights @ Pmat).value).ravel()
-        data["RMS error"] = np.asarray(
-            cvx.norm(Wmat @ Pmat - Rmat, 2, axis=0).value
-        ).ravel()
+        data["RMS error"] = np.asarray(cvx.norm(Wmat @ Pmat - Rmat, 2, axis=0).value).ravel()
         data["RMS error"] /= np.sqrt(num_sources)
         return data
 
@@ -396,24 +394,15 @@ class MarketSimulator:
             x_delta
         )  # ideal amount transacted in an absolute sense (without tx costs and integer consideration)
 
-        sign_x_delta = (
-            x_delta / abs_x_delta
-        )  # used to track the signs of the original transaction directions
+        sign_x_delta = x_delta / abs_x_delta  # used to track the signs of the original transaction directions
 
         # Optimization
         cpx = cplex.Cplex()
         cpx.objective.set_sense(cpx.objective.sense.minimize)
 
-        var_names = (
-            [f"x{i}" for i in range(n)]
-            + [f"x_d{i}" for i in range(n)]
-            + [f"x_t{i}" for i in range(n)]
-            + ["c"]
-        )
+        var_names = [f"x{i}" for i in range(n)] + [f"x_d{i}" for i in range(n)] + [f"x_t{i}" for i in range(n)] + ["c"]
         a = 1  # Used to reduce or increase penalty on holding cash
-        c = (
-            [-1] * n + [0] * n + [0] * n + [a]
-        )  # Vector of ones for each x_delta and 0's for transaction costs
+        c = [-1] * n + [0] * n + [0] * n + [a]  # Vector of ones for each x_delta and 0's for transaction costs
         # TODO: Think about building a A matrix creator
         A = []
         for i in range(n):
@@ -437,12 +426,7 @@ class MarketSimulator:
 
         zeros = [0] * n
         # NOTE: cash_init - interest ensures that the opt cash > interest amount
-        rhs = (
-            (turnover * abs_x_delta).tolist()
-            + [cash_init - interest]
-            + zeros
-            + [interest]
-        )
+        rhs = (turnover * abs_x_delta).tolist() + [cash_init - interest] + zeros + [interest]
         senses = "E" * (2 * n + 1) + "G"
 
         cpx.linear_constraints.add(rhs=rhs, senses=senses)
@@ -450,8 +434,7 @@ class MarketSimulator:
             obj=c,
             columns=A,
             names=var_names,
-            types=[cpx.variables.type.integer] * 20
-            + [cpx.variables.type.continuous] * 41,
+            types=[cpx.variables.type.integer] * 20 + [cpx.variables.type.continuous] * 41,
         )
 
         cpx.set_results_stream(None)

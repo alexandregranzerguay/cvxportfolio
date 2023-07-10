@@ -39,6 +39,7 @@ __all__ = [
     "Cardinality",
     "TrackingErrorMax",
     "TurnoverLimit",
+    "MinAlpha",
 ]
 
 
@@ -310,6 +311,24 @@ class FixedAlpha(BaseConstraint):
         return values_in_time(self.return_forecast, t).T @ w_plus[:-1] == values_in_time(self.alpha_target, t)
 
 
+class MinAlpha(BaseConstraint):
+    """A constraint to fix portfolio-wide alpha
+
+    Attributes:
+        forecast_returns: An (n * 1) vector giving the return forecast on each
+        asset
+        alpha_target: A series or number giving the targeted portfolio return
+    """
+
+    def __init__(self, return_forecast, alpha_target, **kwargs):
+        super(FixedAlpha, self).__init__(**kwargs)
+        self.return_forecast = return_forecast
+        self.alpha_target = alpha_target
+
+    def _weight_expr(self, t, w_plus, z, v):
+        return values_in_time(self.return_forecast, t).T @ w_plus[:-1] >= values_in_time(self.alpha_target, t)
+
+
 # class Alpha(BaseConstraint):
 #     def __init__(self, return_forecast, alpha_target, **kwargs):
 #         super(FixedAlpha, self).__init__(**kwargs)
@@ -323,16 +342,21 @@ class FixedAlpha(BaseConstraint):
 class Cardinality(FilterAssets, BaseConstraint):
     """A constraint to impose cardinality constraint on portfolio, this introduces MIP complexity"""
 
-    def __init__(self, limit, **kwargs):
+    def __init__(self, limit, include_cash=False, **kwargs):
         self.limit = limit
+        self.include_cash = include_cash
         super().__init__(asset_filter=False, **kwargs)
 
     def _weight_expr(self, t, w_plus, z, v):
         y = cvx.Variable(w_plus.shape[0], boolean=True)
         constr = []
         constr += [sum(y) <= self.limit]
-        for i in range(w_plus[:-1].shape[0]):
-            constr += [w_plus[i] <= 1 * y[i]]
+        if not self.include_cash:
+            for i in range(w_plus[:-1].shape[0]):
+                constr += [w_plus[i] <= 1 * y[i]]
+        else:
+            for i in range(w_plus.shape[0]):
+                constr += [w_plus[i] <= 1 * y[i]]
         return constr
 
         # return cvx.norm(w_plus[:-1], "nuc") <= self.limit
