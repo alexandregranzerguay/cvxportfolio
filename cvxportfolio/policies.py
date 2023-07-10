@@ -27,7 +27,7 @@ from itertools import repeat
 
 import cvxpy as cvx
 import multiprocess
-import ncvx as nc
+# import ncvx as nc
 import numpy as np
 import pandas as pd
 
@@ -2243,52 +2243,52 @@ class ADMCardinalityMPO(ADMCardinalitySPO):
         return w_z.value
 
 
-class NCVXCardinalitySPO(Cardinality):
-    # Does not work at the moment
-    def __init__(self, **kwargs):
-        self.method = "NCVX"
-        super().__init__(**kwargs)
+# class NCVXCardinalitySPO(Cardinality):
+#     # Does not work at the moment
+#     def __init__(self, **kwargs):
+#         self.method = "NCVX"
+#         super().__init__(**kwargs)
 
-    def NCVX(self, t):
-        # z = cvx.Variable(self.w.size)
-        w_next = nc.Card(self.w.size, self.card, 1).flatten()
-        z = w_next - self.w
+#     def NCVX(self, t):
+#         # z = cvx.Variable(self.w.size)
+#         w_next = nc.Card(self.w.size, self.card, 1).flatten()
+#         z = w_next - self.w
 
-        # Objective Function
-        ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
+#         # Objective Function
+#         ret = -self.gamma_excess * self.return_forecast.weight_expr(t, wplus=w_next, w_index=self.w_index)
 
-        # assert tracking_term.is_convex()
-        assert ret.is_convex()
+#         # assert tracking_term.is_convex()
+#         assert ret.is_convex()
 
-        # Additional Costs & Constraints
-        costs, constraints = [], []
+#         # Additional Costs & Constraints
+#         costs, constraints = [], []
 
-        for cost in self.costs:
-            cost_expr, const_expr = cost.weight_expr(t, w_next, z, self.value)
-            costs.append(cost_expr)
-            constraints += const_expr
+#         for cost in self.costs:
+#             cost_expr, const_expr = cost.weight_expr(t, w_next, z, self.value)
+#             costs.append(cost_expr)
+#             constraints += const_expr
 
-        for item in (con.weight_expr(t, w_next, z, self.value) for con in self.constraints):
-            constraints += item if isinstance(item, list) else [item]
-        for el in costs:
-            assert el.is_convex()
+#         for item in (con.weight_expr(t, w_next, z, self.value) for con in self.constraints):
+#             constraints += item if isinstance(item, list) else [item]
+#         for el in costs:
+#             assert el.is_convex()
 
-        for el in constraints:
-            assert el.is_dcp()
+#         for el in constraints:
+#             assert el.is_dcp()
 
-        obj = cvx.Minimize(ret + sum(costs))
-        prob = cvx.Problem(obj, [cvx.sum(w_next) == 1] + constraints)
-        try:
-            # prob.solve(solver=self.solver, **self.solver_opts)
-            prob.solve(method="NC-ADMM")
-            if prob.status == "unbounded":
-                logging.error("The problem is unbounded. Defaulting to no trades")
-                return self._nulltrade(self.portfolio)
+#         obj = cvx.Minimize(ret + sum(costs))
+#         prob = cvx.Problem(obj, [cvx.sum(w_next) == 1] + constraints)
+#         try:
+#             # prob.solve(solver=self.solver, **self.solver_opts)
+#             prob.solve(method="NC-ADMM")
+#             if prob.status == "unbounded":
+#                 logging.error("The problem is unbounded. Defaulting to no trades")
+#                 return self._nulltrade(self.portfolio)
 
-            if prob.status == "infeasible":
-                logging.error("The problem is infeasible. Defaulting to no trades")
-                return self._nulltrade(self.portfolio)
-            return z.value
-        except Exception as e:
-            print(e)
-            print("Error solving f() part of the problem")
+#             if prob.status == "infeasible":
+#                 logging.error("The problem is infeasible. Defaulting to no trades")
+#                 return self._nulltrade(self.portfolio)
+#             return z.value
+#         except Exception as e:
+#             print(e)
+#             print("Error solving f() part of the problem")
