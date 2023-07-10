@@ -54,7 +54,7 @@ __all__ = [
     "GoalQuadTrackingMPO",
     "PADMCardinalitySPO",
     "ADMCardinalitySPO",
-    "NCVXCardinalitySPO",
+    # "NCVXCardinalitySPO",
     "PADMCardinalityMPO",
     "ADMCardinalityMPO",
     "MaxPADMCardinalitySPO",
