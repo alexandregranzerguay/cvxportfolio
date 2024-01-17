@@ -563,7 +563,8 @@ class QuadTrackingSPO(BasePolicy):
 
         # Filter index benchmark portfolio
         w_index = values_in_time(self.index_weights, t).pipe(self.pre_filter)
-        # w_index["cash"] = 0
+        if self.cash_key not in w_index.index:
+            w_index[self.cash_key] = 0
         self.w_index = w_index.copy()
         assets = w_index.index
 
@@ -572,28 +573,37 @@ class QuadTrackingSPO(BasePolicy):
         value = portfolio.sum()
         assert value > 0.0
         w = cvx.Constant(portfolio.values / value)
-        z = cvx.Variable(w.size)  # TODO pass index
+
+        prob_arr = []
+        z_vars = []
+
+        rng = np.random.default_rng()
+
+        index_track = []
+        w_arr = []
+        track_vars = []
+        ret_vars = []
+        risk_vars = []
+
+        # check if returns and risk matrices need to be updated
+        if hasattr(self.return_forecast, "update"):
+            self.return_forecast.update(t)
+        if hasattr(self.Sigma, "update"):
+            self.Sigma.filter(assets).update(t)
+
+        index_track.append(w_index.copy())
+        z = cvx.Variable(*w.shape)
         wplus = w + z
 
-        if self.max_ret:
-            # # Use max mu^T @ (w - w_index) as objective and constrain excess risk
-            ret = -self.gamma_excess * self.return_forecast.filter(assets).weight_expr(t, wplus, w_index=w_index)
-        elif isinstance(self.Sigma, BaseRiskModel):
-            # Uncomment for Huang et al.
-            # h_index_ret = w_index @ self.return_forecast
-            # h_port_ret = self.gamma_excess * self.return_forecast.filter(assets).weight_expr(t, wplus, w_index=w_index)
-            # huang = cvx.square(cvx.pos(h_index_ret - h_port_ret))
-            # ret = huang
-
-            ret = self.gamma_te * self.Sigma.filter(assets).weight_expr(t, wplus - w_index, z, value)[0]
-        else:
-            Sigma = values_in_time(self.Sigma, t)
-            idx = Sigma.columns.get_indexer(assets)
-            Sigma_filt = Sigma.loc[:, assets].iloc[idx]
-            ret = self.gamma_te * cvx.quad_form((wplus - w_index), Sigma_filt)
+        tau = t
+        ret = self.gamma_excess * self.return_forecast.filter(assets).weight_expr_ahead(
+                t, tau, wplus, excess=False
+            )
+        track = self.gamma_te * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
+        risk = self.gamma_risk * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus, z, value)[0]
 
         assert ret.is_convex()
-        # assert tracking_term.is_convex()
+        assert track.is_convex()
 
         costs, constraints = [], []
 
@@ -610,7 +620,8 @@ class QuadTrackingSPO(BasePolicy):
         for el in constraints:
             assert el.is_dcp()
 
-        obj = cvx.Minimize(ret + sum(costs))
+        # obj = cvx.Minimize(ret + sum(costs))
+        obj = cvx.Minimize(track+sum(costs))
         self.prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
@@ -770,9 +781,9 @@ class QuadTrackingMPO(QuadTrackingSPO):
             #     constraints += [1e5 * track <= 1e5 * self.te_limit]
             # else:
             #     logging.warning("No TE limit set, this may result in large TE")
-            # obj = cvx.Minimize(track)
+            obj = cvx.Minimize(track+sum(costs))
             # obj = cvx.Minimize(risk + sum(costs))
-            obj = cvx.Minimize(risk - (ret - self.alpha) + sum(costs))
+            # obj = cvx.Minimize(risk - (ret - self.alpha) + sum(costs))
             # constraints += [ret >= self.alpha]
 
             prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
@@ -1535,6 +1546,9 @@ class PADMCardinalityMPO(PADMCardinalitySPO):
                     w = w_prev
                 y = self.g(w)
                 self.y_store.append(y)
+                # self.obj_store.append(
+                #     self.gamma_te * self.Sigma.filter(self.assets).weight_expr_ahead(t, tau, wplus - w_index, z, self.value)[0]
+                # )
                 self.gap_store.append(self._gap(w, y))
                 try:
                     if np.linalg.norm(w - w_prev, np.inf) < 1e-4 and np.linalg.norm(y - y_prev, np.inf) < 1e-4:
