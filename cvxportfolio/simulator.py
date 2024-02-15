@@ -211,20 +211,26 @@ class MarketSimulator:
 
             if "index_weights" in policy.__dict__:
                 try:
-                    w_index = policy.index_weights.loc[t][assets].to_numpy().reshape(-1, 1)
+                    w_index = policy.w_index[assets].to_numpy().reshape(-1, 1)
                     sigma = values_in_time(policy.Sigma.Sigma, t)
                     idx = sigma.columns.get_indexer(assets)
                     sigma = sigma.loc[:, assets].iloc[idx].to_numpy()
                     h_num = h[assets].to_numpy().reshape(-1, 1)
                     w = h_num / h_num.sum()
-                    real_track = (w - w_index).T @ sigma @ (w - w_index)
-                    real_risk = w.T @ sigma @ w
+                    in_samp_track = (w - w_index).T @ sigma @ (w - w_index)
+                    in_samp_risk = w.T @ sigma @ w
+                    real_ret = self.market_returns.loc[t, assets].to_numpy().reshape(-1, 1).T @ w
+                    next_w_index = policy.w_index * (1 + self.market_returns.loc[t])
+                    next_w_index = next_w_index / next_w_index.sum()
+                    next_w = h / h.sum()
+                    next_dist = np.square(next_w_index - next_w)
 
                     # Reporting
-                    results.log_data("track_vals", t, real_track[0])
-                    results.log_data("risk_vals", t, real_risk[0])
-                    results.log_data("w_index", t, policy.index_weights.loc[t])
-                    results.log_data("w_dist", t, np.abs(self.w_plus - policy.index_weights.loc[t]))
+                    results.log_data("track_vals", t, in_samp_track[0])
+                    results.log_data("risk_vals", t, in_samp_risk[0])
+                    results.log_data("ret_vals", t, real_ret[0])
+                    results.log_data("w_index", t, next_w_index)
+                    results.log_data("w_dist", t, next_dist)
                 except Exception as e:
                     print(f"Error in reporting: {e}")
             else:

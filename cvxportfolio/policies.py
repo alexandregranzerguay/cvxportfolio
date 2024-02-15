@@ -59,6 +59,7 @@ __all__ = [
     "ADMCardinalityMPO",
     "MaxPADMCardinalitySPO",
     "GoalPADMCardinalityMPO",
+    "SDTETrackingMPO",
 ]
 
 
@@ -501,12 +502,14 @@ class QuadTrackingSPO(BasePolicy):
         costs,
         constraints,
         gamma_te,
+        gamma_excess,
         Sigma,
         index_weights=None,
         solver=None,
         solver_opts=None,
         index_value=None,
         max_ret=False,
+        te_limit=None,
         **kwargs,
     ):
         if not isinstance(return_forecast, BaseReturnsModel):
@@ -516,8 +519,12 @@ class QuadTrackingSPO(BasePolicy):
         # self.float_shares = float_shares
         self.index_weights = index_weights
         self.gamma_te = gamma_te
+        self.gamma_excess = gamma_excess
         self.Sigma = Sigma
         self.max_ret = max_ret
+        if self.max_ret and te_limit is None:
+            raise ValueError("Must specify te_limit when max_ret is True")
+        self.te_limit = te_limit
         # self.returns_index = returns_index
         # self.index_weights = index_weights
         # self.TE = TE
@@ -600,7 +607,7 @@ class QuadTrackingSPO(BasePolicy):
                 t, tau, wplus, excess=False
             )
         track = self.gamma_te * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
-        risk = self.gamma_risk * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus, z, value)[0]
+        # risk = self.gamma_risk * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus, z, value)[0]
 
         assert ret.is_convex()
         assert track.is_convex()
@@ -621,7 +628,11 @@ class QuadTrackingSPO(BasePolicy):
             assert el.is_dcp()
 
         # obj = cvx.Minimize(ret + sum(costs))
-        obj = cvx.Minimize(track+sum(costs))
+        if self.max_ret:
+            obj = cvx.Maximize(ret - sum(costs))
+            constraints += [track <= self.te_limit]
+        else:
+            obj = cvx.Minimize(track+sum(costs))
         self.prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
         try:
             self.prob.solve(solver=self.solver, **self.solver_opts)
@@ -699,7 +710,8 @@ class QuadTrackingMPO(QuadTrackingSPO):
             portfolio = portfolio.fillna(0.0)
 
         # Filter index benchmark portfolio
-        w_index = values_in_time(self.index_weights, t).pipe(self.pre_filter)
+        prev_t = self.index_weights.loc[:t].index[-2]
+        w_index = values_in_time(self.index_weights, prev_t).pipe(self.pre_filter)
         if self.cash_key not in w_index.index:
             w_index[self.cash_key] = 0
         self.w_index = w_index.copy()
@@ -744,10 +756,10 @@ class QuadTrackingMPO(QuadTrackingSPO):
             wplus = w + z
 
             ret = self.gamma_excess * self.return_forecast.filter(assets).weight_expr_ahead(
-                t, tau, wplus, excess=False
+                t, tau, wplus, excess=self.max_ret
             )
             track = self.gamma_te * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus - w_index, z, value)[0]
-            risk = self.gamma_risk * self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus, z, value)[0]
+            risk = self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus, z, value)[0]
 
             # try:
             #     assert ret.is_convex()
@@ -781,7 +793,11 @@ class QuadTrackingMPO(QuadTrackingSPO):
             #     constraints += [1e5 * track <= 1e5 * self.te_limit]
             # else:
             #     logging.warning("No TE limit set, this may result in large TE")
-            obj = cvx.Minimize(track+sum(costs))
+            if self.max_ret:
+                obj = cvx.Maximize(ret - sum(costs))
+                constraints += [track <= self.te_limit]
+            else:
+                obj = cvx.Minimize(track + sum(costs))
             # obj = cvx.Minimize(risk + sum(costs))
             # obj = cvx.Minimize(risk - (ret - self.alpha) + sum(costs))
             # constraints += [ret >= self.alpha]
@@ -832,6 +848,141 @@ class QuadTrackingMPO(QuadTrackingSPO):
     def optToArr(self, l):
         arr_l = [el.value for el in l]
         return np.array(arr_l)
+    
+class SDTETrackingMPO(QuadTrackingMPO):
+    def __init (self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def get_trades(self, portfolio, t=dt.datetime.now(), force_start=None):
+        if portfolio.isna().any():
+            portfolio = portfolio.fillna(0.0)
+
+        # Filter index benchmark portfolio
+        w_index = values_in_time(self.index_weights, t).pipe(self.pre_filter)
+        if self.cash_key not in w_index.index:
+            w_index[self.cash_key] = 0
+        self.w_index = w_index.copy()
+        assets = w_index.index
+
+        # Pre-Optimization
+        portfolio = portfolio.pipe(self.pre_filter, assets)
+        value = portfolio.sum()
+        assert value > 0.0
+        w = cvx.Constant(portfolio.values / value)
+
+        prob_arr = []
+        z_vars = []
+
+        rng = np.random.default_rng()
+
+        index_track = []
+        w_arr = []
+        track_vars = []
+        ret_vars = []
+        risk_vars = []
+
+        # check if returns and risk matrices need to be updated
+        if hasattr(self.return_forecast, "update"):
+            self.return_forecast.update(t)
+        if hasattr(self.Sigma, "update"):
+            self.Sigma.filter(assets).update(t)
+
+        # planning_periods = self.lookahead_model.get_periods(t)
+        for tau in self.trading_times[
+            self.trading_times.index(t) : self.trading_times.index(t) + self.lookahead_periods
+        ]:
+            if tau != t:
+                if self.estimated_index_w:
+                    w_index[:-1] = np.abs(w_index[:-1] + rng.normal(0, 0.01, w_index[:-1].shape))
+                    w_index = w_index / np.sum(w_index)
+                else:
+                    temp_w = w_index + w_index.mul(self.return_forecast.filter(assets).weight_expr_ahead(t, tau))
+                    w_index = temp_w / temp_w.sum()
+            index_track.append(w_index.copy())
+            z = cvx.Variable(*w.shape)
+            wplus = w + z
+
+            ret = self.gamma_excess * self.return_forecast.filter(assets).weight_expr_ahead(
+                t, tau, wplus, excess=self.max_ret
+            )
+            track = self.gamma_te * cvx.square(self.return_forecast.filter(assets).weight_expr_ahead(
+                t, tau, wplus = wplus, w_index = w_index, excess=True)
+            )
+            risk = self.Sigma.filter(assets).weight_expr_ahead(t, tau, wplus, z, value)[0]
+
+            costs, constraints = [], []
+
+            for cost in self.costs:
+                cost_expr, const_expr = cost.weight_expr_ahead(t, tau, wplus, z, value)
+                if isinstance(cost, TcostModel):
+                    tcost = cost_expr
+                costs.append(cost_expr)
+                constraints += const_expr
+
+            for item in (con.filter(assets).weight_expr(t, wplus, z, value) for con in self.constraints):
+                constraints += item if isinstance(item, list) else [item]
+            for el in costs:
+                assert el.is_convex()
+
+            for el in constraints:
+                assert el.is_dcp()
+
+            track_vars.append(track)
+            ret_vars.append(ret)
+            risk_vars.append(risk)
+
+            if self.max_ret:
+                obj = cvx.Maximize(ret - sum(costs))
+                constraints += [track <= self.te_limit]
+            else:
+                obj = cvx.Minimize(track + sum(costs))
+            # obj = cvx.Minimize(risk + sum(costs))
+            # obj = cvx.Minimize(risk - (ret - self.alpha) + sum(costs))
+            # constraints += [ret >= self.alpha]
+
+            prob = cvx.Problem(obj, [cvx.sum(z) == 0] + constraints)
+            prob_arr.append(prob)
+            z_vars.append(z)
+            w_arr.append(wplus)
+            w = wplus
+
+        # Terminal constraint.
+        if self.terminal_weights is not None:
+            prob_arr[-1].constraints += [wplus == self.terminal_weights.values]
+
+        if self.warm_start_w is not None:
+            for i, z in enumerate(z_vars):
+                if i == 0:
+                    z.value = self.warm_start_w[i] - (portfolio.values / value)
+                else:
+                    z.value = self.warm_start_w[i] - self.warm_start_w[i - 1]
+
+        # We are summing all problems in order to obtain overall objective
+        self.prob = sum(prob_arr)
+        try:
+            self.prob.solve(solver=self.solver, **self.solver_opts)
+            self.track_val = [track.value for track in track_vars][0]
+            self.ret_val = [ret.value for ret in ret_vars][0]
+            self.risk_val = [risk.value for risk in risk_vars][0]
+            if self.prob.status == "unbounded":
+                logging.error("The problem is unbounded. Defaulting to no trades")
+                return self._nulltrade(portfolio)
+
+            if self.prob.status == "infeasible":
+                logging.error("The problem is infeasible. Defaulting to no trades")
+                return self._nulltrade(portfolio)
+
+            # for con in prob_arr[0].constraints:
+            #     if con.id == self.te_const_id:
+            return pd.Series(index=portfolio.index, data=(z_vars[0].value * value))
+        except (cvx.SolverError, TypeError) as e:
+            # for cost in self.costs:
+            #     cost.expression.value = 0
+            logging.error(e)
+            logging.error(f"Solver status: {self.prob.status}")
+            logging.error(f"The solver {self.solver} failed. Defaulting to no trades")
+            return self._nulltrade(portfolio)
+
 
 
 class UtilityModel:
@@ -1161,7 +1312,8 @@ class Cardinality(BasePolicy):
             t = dt.datetime.now()
 
         # Filter index benchmark portfolio
-        w_index = values_in_time(self.index_weights, t).pipe(self.pre_filter)
+        prev_t = self.index_weights.loc[:t].index[-2]
+        w_index = values_in_time(self.index_weights, prev_t).pipe(self.pre_filter)
         if self.cash_key not in w_index.index:
             w_index[self.cash_key] = 0
         self.w_index = w_index.copy()

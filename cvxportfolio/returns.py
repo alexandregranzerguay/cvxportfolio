@@ -197,11 +197,12 @@ class MPOReturnsForecast(BlackLittermanModel):
 
 
 class onlineMPOReturnsForecast(MPOReturnsForecast):
-    def __init__(self, ret, lookahead_periods, trading_times, **kwargs):
+    def __init__(self, ret, lookahead_periods, trading_times, trading_frequency, **kwargs):
         self.lookahead_periods = lookahead_periods
         self.ret = ret
         self.trading_times = trading_times
         self.online = True
+        self.trading_frequency = trading_frequency
         super().__init__(ret_est=None, **kwargs)
 
     def update(self, t):
@@ -215,6 +216,14 @@ class onlineMPOReturnsForecast(MPOReturnsForecast):
         assert start_dt >= 0
 
         self.ret_obs = self.ret.iloc[start_dt:end_dt]
+        # turn observed returns into log returns
+        self.ret_obs = np.log(self.ret_obs + 1)
+        # trading_frequency dictionary 
+        freq = {"daily": "B", "weekly": "W", "monthly": "BMS", "quarterly": "BQS", "yearly": "BYS"}
+        # add returns based on trading frequency
+        self.ret_obs = self.ret_obs.resample(freq[self.trading_frequency]).sum()
+        # undo log returns
+        self.ret_obs = np.exp(self.ret_obs) - 1
         # numpy objects
         mu = np.mean(self.ret_obs, axis=0)
         cov = np.cov(self.ret_obs, rowvar=False)
@@ -224,16 +233,39 @@ class onlineMPOReturnsForecast(MPOReturnsForecast):
         index_list = self.ret.loc[periods[0] : periods[-1]].index
         num_days = len(index_list)
 
-        # create planning matrix
-        mvn = rng.multivariate_normal(mu, cov, size=(sample_size, num_days))
-        self.mvn_avg = pd.DataFrame(index=index_list, data=mvn.mean(axis=0), columns=self.ret.columns)
-
         for i, tau in enumerate(periods):
-            # cumulative return for each rebal period (previous tau to current tau)
-            if i == 0:
-                self.ret_est[(periods[0], tau)] = ((self.mvn_avg.loc[periods[0] : tau] + 1).cumprod() - 1).iloc[-1]
-            else:
-                self.ret_est[(periods[0], tau)] = ((self.mvn_avg.loc[periods[i - 1] : tau] + 1).cumprod() - 1).iloc[-1]
+            self.ret_est[(periods[0], tau)] = mu
+    
+    # def update(self, t):
+    #     rng = np.random.default_rng()
+    #     self.ret_est = {}
+    #     sample_size = 1000
+
+    #     idx = self.ret.index.get_indexer([t], method="pad")[0]
+    #     end_dt = idx
+    #     start_dt = max(idx - 252, 0)
+    #     assert start_dt >= 0
+
+    #     self.ret_obs = self.ret.iloc[start_dt:end_dt]
+    #     # numpy objects
+    #     mu = np.mean(self.ret_obs, axis=0)
+    #     cov = np.cov(self.ret_obs, rowvar=False)
+
+    #     idx = self.trading_times.index(t)
+    #     periods = self.trading_times[idx : idx + self.lookahead_periods]
+    #     index_list = self.ret.loc[periods[0] : periods[-1]].index
+    #     num_days = len(index_list)
+
+    #     # create planning matrix
+    #     mvn = rng.multivariate_normal(mu, cov, size=(sample_size, num_days))
+    #     self.mvn_avg = pd.DataFrame(index=index_list, data=mvn.mean(axis=0), columns=self.ret.columns)
+
+    #     for i, tau in enumerate(periods):
+    #         # cumulative return for each rebal period (previous tau to current tau)
+    #         if i == 0:
+    #             self.ret_est[(periods[0], tau)] = ((self.mvn_avg.loc[periods[0] : tau] + 1).cumprod() - 1).iloc[-1]
+    #         else:
+    #             self.ret_est[(periods[0], tau)] = ((self.mvn_avg.loc[periods[i - 1] : tau] + 1).cumprod() - 1).iloc[-1]
 
 
 class MultipleReturnsForecasts(BaseReturnsModel):
